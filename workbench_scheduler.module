@@ -1243,12 +1243,6 @@ function workbench_scheduler_process_start_dates($timestamp) {
         else {
           workbench_moderation_moderate($node, $node_schedule->start_state);
         }
-        // If not the 'published' state, set to 'unpublished'.
-        if ($node_schedule->start_state != 'published') {
-          $node->status = 0;
-          // Update the node.
-          node_save($node);
-        }
         // Does this schedule have an end date as well?
         if ($node_schedule->end_date) {
         }
@@ -1357,11 +1351,6 @@ function workbench_scheduler_process_end_dates($timestamp) {
         // Moderate the node using workbench_moderation.
         else {
           workbench_moderation_moderate($node, $node_schedule->end_state);
-        }
-        // If not the 'published' state, set to 'unpublished.
-        if ($node_schedule->end_state != 'published') {
-          $node->status = 0;
-          node_save($node);
         }
 
         // Mark schedule as completed.
