@@ -100,7 +100,7 @@ function workbench_scheduler_manage_schedules_access_check() {
     // Attempt to load schedule types and node.
     if (($types = workbench_scheduler_get_types()) && ($node = node_load(arg(1)))) {
       // Check if node is a schedule type.
-      return in_array($node->type, $types);
+      return !empty($types) && in_array($node->type, $types);
     }
   }
 
