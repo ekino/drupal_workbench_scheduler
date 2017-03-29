@@ -649,6 +649,8 @@ function workbench_scheduler_count_node_schedules($nid, $status = FALSE) {
   $node_schedules->addExpression('(COUNT(wsn.completed) - SUM(wsn.completed))', 'active_schedules');
   // WHERE node id matches this node id.
   $node_schedules->condition('wsn.nid', $nid)
+  // GROUP BY nid.
+    ->groupBy('wsn.nid')
   // Return single row, save comutation time.
     ->range(0, 1);
   // Execute.
