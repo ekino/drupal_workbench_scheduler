@@ -31,17 +31,11 @@ function workbench_scheduler_schema() {
         'length' => '255',
         'not null' => TRUE,
       ),
-      'start_state' => array(
-        'description' => 'The state to set at the start date',
-        'type' => 'varchar',
-        'length' => '255',
-        'not null' => TRUE,
-      ),
-      'end_state' => array(
-        'description' => 'The state to set at the end date',
-        'type' => 'varchar',
-        'length' => '255',
-        'not null' => TRUE,
+      'transition' => array(
+        'description' => 'The id of the transition',
+        'type' => 'int',
+        'not null' => FALSE,
+        'unsigned' => TRUE,
       ),
     ),
     'primary key' => array('sid'),
@@ -92,18 +86,12 @@ function workbench_scheduler_schema() {
         'not null' => TRUE,
         'unsigned' => TRUE,
       ),
-      'start_date' => array(
-        'description' => 'the date when the start state should be applied',
+      'date' => array(
+        'description' => 'the date when the new state should be applied',
         'type' => 'int',
         'unsigned' => TRUE,
-        'not null' => TRUE,
-      ),
-      'end_date' => array(
-        'description' => 'the date when the end state should be applied',
-        'type' => 'int',
-        'unsigned' => TRUE,
-        'default' => 0,
         'not null' => FALSE,
+        'default' => 0,
       ),
       'completed' => array(
         'description' => 'mark if the schedule has been completed for this node',
@@ -114,7 +102,7 @@ function workbench_scheduler_schema() {
       ),
     ),
     'unique keys' => array(
-      'vid' => array('vid'),
+      'vid' => array('vid', 'sid'),
     ),
     'foreign_keys' => array(
       'nid' => array('node' => 'nid'),
@@ -124,4 +112,467 @@ function workbench_scheduler_schema() {
   );
 
   return $schema;
+}
+
+/**
+ * Update from 7.x-1.x version to 7.x-2.0 version.
+ */
+function workbench_scheduler_update_7200(&$sandbox) {
+  $message = t('Workbench Scheduler updates completed.');
+  // First pass, no progress set.
+  if (!isset($sandbox['phase'])) {
+    // Check to see if old fields exist. Only run update if upgrading from 1.x.
+    if (db_field_exists('workbench_scheduler_schedules', 'start_state')) {
+      // Set phase.
+      $sandbox['phase'] = 1;
+    }
+    else {
+      //Can skip updating.
+      $sandbox['phase'] = 6;
+    }
+    $sandbox['max_phases'] = 6;
+  }
+
+  // Change actions based on phase.
+  switch ($sandbox['phase']) {
+    // Phase one(1): Add new DB fields.
+    case 1:
+      $schema = workbench_scheduler_schema();
+
+      // Add default to prevent errors during update.
+      $schedule_fields = array('start_state', 'end_state');
+      foreach($schedule_fields as $field) {
+        if (db_field_exists('workbench_scheduler_schedules', $field)) {
+          db_change_field('workbench_scheduler_schedules', $field, $field, array(
+            'type' => 'varchar',
+            'length' => 255,
+            'not null' => FALSE,
+          ));
+        }
+      }
+
+      // Update the following fields
+      $node_schedule_fields = array('start_date', 'end_date');
+      foreach($node_schedule_fields as $field) {
+        if (db_field_exists('workbench_scheduler_nodes', $field)) {
+          db_change_field('workbench_scheduler_nodes', $field, $field, array(
+            'type' => 'int',
+            'length' => 10,
+            'not null' => FALSE,
+          ));
+        }
+      }
+
+      // Updating unique keys.
+      if (db_field_exists('workbench_scheduler_nodes', 'sid')) {
+        db_drop_unique_key('workbench_scheduler_nodes', 'vid');
+        db_add_unique_key('workbench_scheduler_nodes', 'vid', array('vid', 'sid'));
+      }
+
+
+      // Add new Schedules DB fields.
+      if (!db_field_exists('workbench_scheduler_schedules', 'transition')) {
+        db_add_field('workbench_scheduler_schedules', 'transition', $schema['workbench_scheduler_schedules']['fields']['transition']);
+      }
+
+      // Add new Nodes DB fields.
+      if (!db_field_exists('workbench_scheduler_nodes', 'date')) {
+        db_add_field('workbench_scheduler_nodes', 'date', $schema['workbench_scheduler_nodes']['fields']['date']);
+      }
+
+      // Move onto Phase two(2).
+      $sandbox['phase'] = 2;
+      // Set current schedule.
+      $sandbox['current_sid'] = 0;
+      // Set schedule progress.
+      $sandbox['schedule_progress'] = 0;
+      // Get schedule max
+      $sandbox['schedule_max'] = db_query('SELECT COUNT(*) FROM {workbench_scheduler_schedules} WHERE transition IS NULL')->fetchField();
+      break;
+
+    // Phase two(2): Update any existing schedules.
+    case 2:
+
+      $states_labels = workbench_moderation_states();
+
+      // Fetch one schedule. Only going to process one schedule at a time.
+      $schedule = db_select('workbench_scheduler_schedules', 's')
+        ->fields('s', array('sid', 'name', 'label', 'start_state', 'end_state'))
+        ->condition('sid', $sandbox['current_sid'], '>')
+        ->condition('transition', NULL)
+        ->range(0, 1)
+        ->orderBy('sid', 'ASC')
+        ->execute()
+        ->fetchObject();
+
+
+      if (!empty($schedule)) {
+        // Load the full schedule object.
+        $schedule = workbench_scheduler_schedules_load($schedule->sid);
+
+        // Query all the nodes assigned to the schedule and return their current state.
+        // All the current states are going to tbe the from_name.
+        $query = db_select('workbench_scheduler_nodes', 'wsn');
+        $query->join('workbench_moderation_node_history', 'wmnh', 'wmnh.vid = wsn.vid');
+        $query->fields('wmnh', array('state'));
+        $query->condition('wsn.sid', $schedule->sid)
+          ->condition('wsn.completed', 0)
+          ->condition('wmnh.is_current', TRUE);
+        $result = $query->execute()->fetchCol();
+        $names = array_unique($result);
+
+        // Define empty schedule candidate array.
+        $schedules = array();
+
+        // Does this schedule have start state and end state?
+        // If so, then we're going to use that as the basis for the from_name and
+        // to_name of the transition.
+        if (!empty($schedule->start_state) && !empty($schedule->end_state)) {
+
+          // If a schedule has a start state and an end state, then we need to
+          // create a new schedule that transitions from wildcard (node current state)
+          // state to that start state.
+          foreach ($names as $from_name) {
+            if ($from_name != $schedule->start_state) {
+              $info = array(
+                'types' => $schedule->types,
+                'transition' => array(
+                  'from_name' => $from_name,
+                  'to_name' => $schedule->start_state
+                )
+              );
+              // Only add the new schedule candidate if it's not in the array.
+              if (!in_array($info, $schedules)) {
+                $schedules[] = $info;
+              }
+            }
+          }
+
+          $schedules[] = array(
+            'sid' => $schedule->sid,
+            'types' => $schedule->types,
+            'transition' => array('from_name' => $schedule->start_state, 'to_name' => $schedule->end_state),
+          );
+
+        }
+        // If the schedule does not have values for both start_state and end_state.
+        // we'll use the node's current_state as the from_name and the start_state/end_state
+        // for to_name.
+        else {
+
+          // Get the to_name value from start_state or end_state (whatever value is provided).
+          if (!empty($schedule->start_state)) {
+            $to_name = $schedule->start_state;
+          }
+          elseif (!empty($schedule->end_state)) {
+            $to_name = $schedule->end_state;
+          }
+
+          foreach ($names as $from_name) {
+            if ($from_name != $to_name) {
+              $info = array(
+                'types' => $schedule->types,
+                'transition' => array(
+                  'from_name' => $from_name,
+                  'to_name' => $to_name
+                )
+              );
+              // Only add the new schedule candidate if it's not in the array.
+              if (!in_array($info, $schedules)) {
+                $schedules[] = $info;
+              }
+            }
+          }
+        }
+
+        // Loop through the schedule candidates and see if they already exist or need
+        // to be created.
+        foreach ($schedules as $schedule_candidate) {
+
+          $transition = $schedule_candidate['transition'];
+
+          // Fetch the transition id.
+          $transition_id = db_select('workbench_moderation_transitions  ', 't')
+            ->fields('t', array('id'))
+            ->condition('from_name', $transition['from_name'])
+            ->condition('to_name', $transition['to_name'])
+            ->range(0, 1)
+            ->execute()
+            ->fetchField();
+
+          // If transition doesn't exist, create it.
+          if (empty($transition_id)) {
+            $transition_id = db_insert('workbench_moderation_transitions')
+              ->fields(array(
+                'name' => $states_labels[$transition['from_name']]->label . ' to ' . $states_labels[$transition['to_name']]->label,
+                'from_name' => $transition['from_name'],
+                'to_name' => $transition['to_name'],
+              ))
+              ->execute();
+          }
+
+          // If sid is set, that means the transition belongs the current schedule.
+          if (!empty($schedule_candidate['sid'])) {
+            $existing_schedule = $schedule;
+          }
+          // Does a schedule with either of these state transitions exist? If so, then update that
+          // schedule with the transition id.
+          else {
+
+            $db_or = db_or()
+              // end_state has a value and start_state is empty.
+              ->condition(db_and()
+                ->condition('start_state', '')
+                ->condition('end_state', $transition->to_name))
+              // OR end_state is empty and start_state has a value.
+              ->condition(db_and()
+                ->condition('start_state', $transition->to_name)
+                ->condition('end_state', ''));
+
+            $existing_schedule = db_select('workbench_scheduler_schedules', 's')
+              ->fields('s', array('name', 'label'))
+              ->condition($db_or)
+              ->isNull('transition')
+              ->range(0, 1)
+              ->execute()
+              ->fetchObject();
+          }
+
+
+          // Save or update schedules.
+          if (!empty($existing_schedule)) {
+            // Load the full schedule object:
+            $existing_schedule_obj = workbench_scheduler_schedules_load($existing_schedule->sid);
+            // Merge content types.
+            $types = array_unique(array_merge($existing_schedule_obj->types, $schedule_candidate['types']));
+
+            $save_schedule = array(
+              'name' => $existing_schedule->name,
+              'label' => $existing_schedule->label,
+              'types' => $types,
+              'transition' => $transition_id,
+            );
+          }
+          // Create a new schedule.
+          else {
+            $save_schedule = array(
+              'name' => $transition['from_name'] . '_' . $transition['to_name'],
+              'label' => $states_labels[$transition['from_name']]->label . ' to ' . $states_labels[$transition['to_name']]->label,
+              'types' => $schedule_candidate['types'],
+              'transition' => $transition_id,
+            );
+          }
+
+          // Then save transition into schedule.
+          workbench_scheduler_save_schedule($save_schedule['name'], array(
+            'label' => $save_schedule['label'],
+            'types' => $save_schedule['types'],
+            'transition' => $transition_id,
+          ));
+        }
+
+        // Move on to next schedule
+        $sandbox['current_sid'] = $schedule->sid;
+        // Update percentage complete.
+        $sandbox['schedule_progress']++;
+
+      }
+      // Go to the next phase.
+      else {
+        // set progress to max.
+        $sandbox['schedule_progress'] = $sandbox['schedule_max'];
+        // Go to phase four(4)
+        $sandbox['phase'] = 3;
+        // Set current node.
+        $sandbox['current_nid'] = 0;
+        // Set node progress.
+        $sandbox['node_progress'] = 0;
+        // Get node max.
+        $sandbox['node_max'] = db_query('SELECT COUNT(*) FROM {workbench_scheduler_nodes} WHERE `date` = 0')->fetchField();
+        // Set current node.
+      }
+      break;
+
+    // Phase three(3): Update nodes.
+    case 3:
+      // Query for next nid.
+      $nid = db_select('workbench_scheduler_nodes', 'n')
+        ->fields('n', array('nid'))
+        ->condition('nid', $sandbox['current_nid'], '>')
+        ->condition('date', 0)
+        ->orderBy('nid', 'ASC')
+        ->execute()
+        ->fetchField();
+
+
+      // Have a nid?
+      if ($nid) {
+        // Get next three(3) revisions to update.
+        $query = db_select('workbench_scheduler_nodes', 'wsn');
+        $query->fields('wsn', array('sid', 'nid', 'vid', 'completed', 'start_date', 'end_date'));
+        $query->fields('wmnh', array('state'));
+
+        $query->join('workbench_moderation_node_history', 'wmnh', 'wmnh.vid = wsn.vid');
+
+        $query
+          ->condition('wsn.nid', $nid)
+          ->condition('wsn.date', 0)
+          ->condition('wmnh.is_current', TRUE) // Only fetch the current revision.
+          ->orderBy('nid', 'ASC')
+          ->orderBy('vid', 'ASC');
+
+        $revisions = $query->execute();
+
+        // Have revisions?
+        if ($revisions->rowCount() > 0) {
+          // Loop through each revision.
+          foreach ($revisions as $revision) {
+            // Has the revision already been completed?
+            if ($revision->completed) {
+              // Use end date if set, else use the start date.
+              $date = ($revision->end_date) ? $revision->end_date : $revision->start_date;
+              // Set the value of the date field.
+              db_update('workbench_scheduler_nodes')
+                ->fields(array(
+                  'date' => $date
+                ))
+                ->condition('nid', $nid)
+                ->condition('vid', $revision->vid)
+                ->execute();
+            }
+            // Has not been completed, need to create new node schedules.
+            else {
+
+              // Load the schedule that is already assigned to this node.
+              $schedule = workbench_scheduler_schedules_load($revision->sid);
+
+              // from_name will almost always be the node's current state.
+              $from_name = $revision->state;
+
+              // If transition is null we need to pull the correct schedule, we'll
+              // use that when we save/update the node schedule.
+              if (empty($schedule->transition)) {
+                if (empty($schedule->start_state) || empty($schedule->end_state)) {
+                  $to_name = (!empty($schedule->start_state)) ? $schedule->start_state : $schedule->end_state;
+                }
+
+                $query = db_select('workbench_scheduler_schedules', 'wss');
+                $query->fields('wss', array('sid'));
+                $query->join('workbench_moderation_transitions', 'wmt', 'wss.transition = wmt.id');
+                $query->condition('wmt.from_name', $from_name);
+                $query->condition('wmt.to_name', $to_name);
+                $sid = $query->execute()->fetchField();
+
+                $schedule = workbench_scheduler_schedules_load($sid);
+              }
+
+              // Load this transition.
+              // Get the from_name of this schedule. We'll use it as the 'two_name' for the next transition.
+              $transition = db_select('workbench_moderation_transitions', 'wmt')
+                ->fields('wmt', array('from_name', 'to_name'))
+                ->condition('id', $schedule->transition)
+                ->execute()
+                ->fetch();
+
+
+              // 'to_name' will almost always be the same as the transition's to_name.
+              $to_name = $transition->to_name;
+
+              // If start_date and end_date have a value then we need to add
+              // another schedule to this.
+              if (!empty($revision->start_date) && !empty($revision->end_date)) {
+                // Update just the date on this node scheudle.
+                // Run a merge query to insert or update the row.
+                $node_schedule = array(
+                  'sid' => $schedule->sid,
+                  'date' => $revision->end_date,
+                );
+                workbench_scheduler_save_node_schedule($revision->nid, $revision->vid, $node_schedule);
+
+                // Insert the other schedule.
+                $to_name = $transition->from_name;
+                $date = $revision->start_date;
+              }
+
+              // If start_date or end_date have values then grab those as the dates.
+              else {
+                $date = (!empty($revision->start_date)) ? $revision->start_date : $revision->end_date;
+              }
+
+              // Grab the appropriate schedule and transition. We may be
+              // updating or inserting a node schedule depending on whether we find it.
+              $query = db_select('workbench_scheduler_schedules', 'wss')
+                ->fields('wss', array('sid'));
+              $query->join('workbench_moderation_transitions', 'wmt', 'wss.transition = wmt.id');
+              $query
+                ->condition('wmt.from_name', $from_name)
+                ->condition('wmt.to_name', $to_name);
+
+              $sid = $query->execute()->fetchField();
+
+              if (!empty($sid)) {
+                // Saving the new node schedule.
+                $node_schedule = array(
+                  'sid' => $sid,
+                  'date' => $date
+                );
+
+                // Run a merge query to insert or update the row.
+                workbench_scheduler_save_node_schedule($revision->nid, $revision->vid, $node_schedule);
+              }
+
+            }
+            $sandbox['node_progress']++;
+          }
+        }
+        $sandbox['current_nid'] = $nid;
+      }
+      // No nodes to retrieve, move onto phase four(4).
+      else {
+        // Set progress to max.
+        $sandbox['node_progress'] = $sandbox['node_max'];
+        // Set message.
+        $message = t('All Workbench Scheduler nodes updated.');
+        // Go to phase five(5)
+        $sandbox['phase'] = 4;
+      }
+      break;
+    // Phase four(4): Remove any schedules that have NULL for transition.
+    case 4:
+      // Remove all schedules where transition = NULL
+      $names = db_select('workbench_scheduler_schedules', 's')
+        ->fields('s', array('name'))
+        ->isNull('transition')
+        ->execute()
+        ->fetchCol();
+
+      if (!empty($names)) {
+        workbench_scheduler_delete_schedules($names);
+
+      }
+      else {
+        // Go to phase four(4)
+        $sandbox['phase'] = 5;
+      }
+
+      break;
+    // Phase four(4): Delete old DB fields.
+    case 5:
+      // Drop Schedule fields.
+      if (db_field_exists('workbench_scheduler_schedules', 'start_state')) {
+        db_drop_field('workbench_scheduler_schedules', 'start_state');
+        db_drop_field('workbench_scheduler_schedules', 'end_state');
+      }
+      // Drop node fields.
+      if (db_field_exists('workbench_scheduler_nodes', 'start_date')) {
+        db_drop_field('workbench_scheduler_nodes', 'start_date');
+        db_drop_field('workbench_scheduler_nodes', 'end_date');
+      }
+      $sandbox['phase'] = 6;
+      break;
+  }
+
+  $sandbox['#finished'] = $sandbox['phase'] / $sandbox['max_phases'];
+
+  return $message;
 }

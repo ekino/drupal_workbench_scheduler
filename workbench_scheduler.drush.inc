@@ -23,7 +23,7 @@ function workbench_scheduler_drush_command() {
 function workbench_scheduler_drush_run() {
   // Call the run function, to process schedules.
   $count = _workbench_scheduler_run();
-  drupal_set_message(t('@count Workbench Schedules were processed.', array(
+  drush_print(dt('@count Workbench Schedules were processed.', array(
     '@count' => $count,
   )));
 }

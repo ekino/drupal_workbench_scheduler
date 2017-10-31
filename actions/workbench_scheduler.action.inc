@@ -1,124 +1,122 @@
 <?php
+
 /**
  * Workbench scheduler actions form.
  * @param $options
  * @return array
  */
 function workbench_scheduler_schedules_action_form($options) {
+  // Does the user have permission to set schedules?
+  $user_permission = workbench_scheduler_schedule_access('set');
+  // And are there any schedules for this node type?
   $form = array();
   $types = node_type_get_types();
 
   // Get all schedules from all content types.
-  $cts_schedules = workbench_scheduler_load_type_schedules(array_keys($types));
+  $cts_schedules = workbench_scheduler_type_schedules_load(array_keys($types));
   foreach ($cts_schedules as $ct => $schedules) {
-    foreach ($schedules as $sid => $schedule) {
+    foreach ($schedules  as $sid => $schedule) {
       $type_schedules[$sid] = $schedule;
     }
   }
 
-  // Add a scheduler section.
-  $form['workbench_scheduler'] = array(
-    '#type'         => 'fieldset',
-    '#title'        => 'Workbench Schedule',
-    '#description'  => t('Select a schedule for changing moderation states.'),
-    '#collapsible'  => TRUE,
-    '#collapsed'    => FALSE,
-    '#group'        => 'additional_settings',
-    '#access'       => user_access('set workbench schedule'),
-  );
-
-  // Build an options array for which schedules to choose.
-  $schedule_options = array();
-  // Add default option of no schedule.
-  $schedule_options[] = array(
-    'label'       => t('No Schedule'),
-    'start_state' => '',
-    'end_state'   => '',
-  );
-
-  // Retrieve a list of human safe moderation state names.
-  $moderation_states = workbench_scheduler_state_labels();
-
-  // Add each type schedule to the options array.
-  foreach ($type_schedules as $schedule) {
-    $schedule_options[$schedule->sid] = array(
-      'label'        => $schedule->label,
-      'start_state'  => (!empty($schedule->start_state) ? $moderation_states[$schedule->start_state] : ''),
-      'end_state'    => (!empty($schedule->end_state) ? $moderation_states[$schedule->end_state] : ''),
+  // If user has permission and schedules exist.
+  if ($user_permission && $type_schedules) {
+    // Add a scheduler section.
+    $form['workbench_scheduler'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Workbench Schedule'),
+      '#access' => workbench_scheduler_schedule_access('set') || workbench_scheduler_schedule_access('view'),
+      '#attached' => array(
+        'js' => array(drupal_get_path('module', 'workbench_scheduler') . '/js/workbench_scheduler.js'),
+      ),
     );
 
-    drupal_add_js(array('workbench_scheduler' => array('schedules' => $schedule_options)), 'setting');
+    // Build an options array for which schedules to choose.
+    $schedule_options = array();
+
+    // Retrieve a list of human safe moderation state names.
+    $moderation_states = workbench_scheduler_state_labels();
+
+    // Loading transitions.
+    $transitions = workbench_moderation_transitions();
+
+    // Add each type schedule to the options array.
+    foreach ($type_schedules as $schedule) {
+      if (workbench_scheduler_schedule_access('set', $schedule)) {
+        // Get transition states.
+        if (!empty($schedule->transition)) {
+          foreach ($transitions as $transition) {
+            if ($transition->id == $schedule->transition) {
+              break;
+            }
+          }
+        }
+
+        $schedule_options[$schedule->sid] = array(
+          'label' => $schedule->label,
+          'from_name' => (!empty($moderation_states[$transition->from_name])) ? $moderation_states[$transition->from_name] : '',
+          'to_name' => (!empty($moderation_states[$transition->to_name])) ? $moderation_states[$transition->to_name] : '',
+        );
+      }
+    }
+
+    // Add schedules to JavaScript settings.
+    $form['workbench_scheduler']['#attached']['js'][] = array(
+      'data' => array('workbench_scheduler' => array('schedules' => $schedule_options)),
+      'type' => 'setting',
+    );
+
+    // Reset schedules checkbox.
+    $form['workbench_scheduler']['workbench_scheduler_reset'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Reset Schedules'),
+      '#description' => t("Delete any existing schedules on this node."),
+    );
 
     // Create table select for selecting schedule.
     $form['workbench_scheduler']['workbench_scheduler_sid'] = array(
-      '#type'         => 'tableselect',
-      '#title'        => t('Select Schedule'),
-      '#description'  => t('Select the schedule to use for this node.'),
-      '#options'      => $schedule_options,
-      '#multiple'     => FALSE,
-      '#header'       => array(
-        'label'         => t('Name'),
-        'start_state'   => t('Start State'),
-        'end_state'     => t('End State'),
+      '#type' => 'tableselect',
+      '#title'  => t('Select Schedule'),
+      '#prefix' => t('Select the schedule(s) to use for this node.'),
+      '#options' => $schedule_options,
+      '#multiple' => TRUE,
+      '#header' => array(
+        'label' => t('Name'),
+        'from_name' => t('When content state is. . .'),
+        'to_name' => t('Set content state to . . .'),
+      ),
+      '#attributes' => array(
+        'class' => array('workbench-schedule-sid'),
       ),
     );
 
-    // Fieldset for collecting schedule dates.
-    $form['workbench_scheduler']['dates'] = array(
-      '#type'         => 'fieldset',
-      '#title'        => t('Schedule Dates'),
-      '#description'  => t('Select the start and/or end dates to trigger states changes for this node.'),
-      '#states'       => array(
-        'invisible' => array(
-          ':input[name=workbench_scheduler_sid]' => array('value' => '0'),
+    foreach ($schedule_options as $sid => $schedule) {
+      // Fieldset for collecting schedule dates.
+      $form['workbench_scheduler']['dates'][$sid] = array(
+        '#type' => 'fieldset',
+        '#title' =>  $schedule['label'],
+        '#states' => array(
+          'visible' => array(
+            ':input[name="workbench_scheduler_sid['.$sid.']"]' => array('checked' => TRUE),
+          ),
         ),
-      ),
-    );
+      );
 
-    // Start date.
-    if (!empty($schedule->start_state)) {
-      $form['workbench_scheduler']['dates']['workbench_scheduler_start_date'] = array(
-        '#type'         => 'date_popup',
-        '#date_format'  => 'Y-m-d H:i',
-        '#title'        => t('Start date'),
-        '#description'  => t('Select the date to switch this node to the scheduled \'start state\''),
+      $form['workbench_scheduler']['dates'][$sid]['workbench_scheduler_date']['#tree'] = TRUE;
+
+      // Date.
+      $form['workbench_scheduler']['dates'][$sid]['workbench_scheduler_date'][$sid] = array(
+        '#type' => 'date_popup',
+        '#date_format' => workbench_scheduler_date_format(),
+        '#title' =>  t('Set content to ') . $schedule['to_name'] . t(' after . . .'),
+        '#description' => t('Note: This schedule will only run when the current moderation state is') .' <strong>'. $schedule['from_name'] . '</strong>.',
       );
     }
 
-    // End date.
-    if (!empty($schedule->end_state)) {
-      $form['workbench_scheduler']['dates']['workbench_scheduler_end_date'] = array(
-        '#type'         => 'date_popup',
-        '#date_format'  => 'Y-m-d H:i',
-        '#title'        => t('End date'),
-        '#description'  => t('Select the date to switch this node to the scheduled \'end state\''),
-      );
-    }
-
-    $node_schedule = isset($form['#node']->workbench_schedule) ? $form['#node']->workbench_schedule : FALSE;
-    // Have a node schedule(editing a node)? Use for defaults.
-    if ($node_schedule) {
-      $form['workbench_scheduler']['workbench_scheduler_sid']['#default_value'] = $node_schedule->sid;
-
-      if ($node_schedule->start_date) {
-        // Format date for field.
-        $start_date = format_date($node_schedule->start_date, 'custom', 'Y-m-d H:i:s');
-        $form['workbench_scheduler']['dates']['workbench_scheduler_start_date']['#default_value'] = $start_date;
-      }
-
-      if ($node_schedule->end_date) {
-        // Format date for field.
-        $end_date = format_date($node_schedule->end_date, 'custom', 'Y-m-d H:i:s');
-        $form['workbench_scheduler']['dates']['workbench_scheduler_end_date']['#default_value'] = $end_date;
-      }
-    }
+    // Custom validation hook.
+    $form['#validate'][] = 'workbench_scheduler_node_form_validate';
   }
-
-  // Add custom validation and submission hooks.
-  $form['#validate'][] = 'workbench_scheduler_node_form_validate';
-  // Add to submit button action so that will have access to the new.
-  // Nid & vid values.
-  $form['actions']['submit']['#submit'][] = 'workbench_scheduler_node_form_submit';
 
   return $form;
 }
@@ -130,15 +128,16 @@ function workbench_scheduler_schedules_action_form($options) {
  * @return mixed
  */
 function workbench_scheduler_schedules_action_submit($form, &$form_state) {
+  $context = array();
 
   if (isset($form_state['values']['workbench_scheduler_sid']))
     $context['workbench_scheduler_sid'] = $form_state['values']['workbench_scheduler_sid'];
 
-  if (isset($form_state['values']['workbench_scheduler_start_date']))
-    $context['workbench_scheduler_start_date'] = $form_state['values']['workbench_scheduler_start_date'];
+  if (isset($form_state['values']['workbench_scheduler_date']))
+    $context['workbench_scheduler_date'] = $form_state['values']['workbench_scheduler_date'];
 
-  if (isset($form_state['values']['workbench_scheduler_end_date']))
-    $context['workbench_scheduler_end_date'] = $form_state['values']['workbench_scheduler_end_date'];
+  if (isset($form_state['values']['workbench_scheduler_reset']))
+    $context['workbench_scheduler_reset'] = $form_state['values']['workbench_scheduler_reset'];
 
   return $context;
 }
@@ -148,26 +147,57 @@ function workbench_scheduler_schedules_action_submit($form, &$form_state) {
  * @param $entity
  * @param array $context
  */
-function workbench_scheduler_schedules_action(&$entity, $context = array()) {
-  
+function  workbench_scheduler_schedules_action(&$entity, $context = array()) {
+  // Change vid to latest.
+  $latest_revision = workbench_moderation_node_current_load($entity);
+  $entity->vid = $latest_revision->vid;
+
   // Only save schedules for content that supports them.
   $types_moderated = workbench_moderation_moderate_node_types();
   $is_moderated = (in_array($entity->type, $types_moderated)) ? TRUE : FALSE;
-  $schedules = workbench_scheduler_load_type_schedules($entity->type);
+  $schedules = workbench_scheduler_type_schedules_load($entity->type);
 
   if ($is_moderated && !empty($schedules)) {
-    $entity->workbench_schedule->sid = $context['workbench_scheduler_sid'];
-
-    if (isset($context['workbench_scheduler_start_date'])) {
-      $entity->workbench_schedule->start_date = strtotime($context['workbench_scheduler_start_date']);
+    // Reset the workbench schedule.
+    if ($context['workbench_scheduler_reset']) {
+      $entity->workbench_schedule = array();
+      workbench_scheduler_delete_node_schedule($entity->nid, $entity->vid);
     }
 
-    if (isset($context['workbench_scheduler_end_date'])) {
-      $entity->workbench_schedule->end_date = strtotime($context['workbench_scheduler_end_date']);
-    }
+    foreach ($context['workbench_scheduler_sid'] as $sid => $sid_enabled) {
+      foreach ($schedules as $name => $info) {
+        if ($sid_enabled && $info->sid == $sid) {
 
-    // Change vid to latest.
-    $live_revision = workbench_moderation_node_current_load($entity);
-    $entity->vid = $live_revision->vid;
+          // Format date.
+          if (!empty($context['workbench_scheduler_date'][$sid])) {
+            $date = strtotime($context['workbench_scheduler_date'][$sid]);
+          }
+          else {
+            $date = '';
+          }
+
+          // Add new properties.
+          $info->date = $date;
+          $info->completed = 0;
+
+          // Does this schedule already exist?
+          $updated = FALSE;
+          if (!empty($entity->workbench_schedule)) {
+            foreach ($entity->workbench_schedule as $index => $entity_schedule) {
+              // Instead of creating a new element, update the existing one.
+              if ($info->sid == $entity_schedule->sid) {
+                $entity->workbench_schedule[$index] = $info;
+                $updated = TRUE;
+              }
+            }
+          }
+
+          // If schedule doesn't already exist create it.
+          if (!$updated) {
+            $entity->workbench_schedule[] = $info;
+          }
+        }
+      }
+    }
   }
 }

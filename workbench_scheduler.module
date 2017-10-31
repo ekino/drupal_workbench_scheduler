@@ -12,7 +12,7 @@ function workbench_scheduler_menu() {
 
   // Schedules.
   $items['admin/config/workbench/scheduler'] = array(
-    'title' => 'Workbench Schedules',
+    'title' => 'Workbench Scheduler',
     'description' => 'Manage content workbench schedules.',
     'page callback' => 'workbench_scheduler_admin_page',
     'access arguments' => array('administer workbench schedules'),
@@ -26,11 +26,22 @@ function workbench_scheduler_menu() {
     'weight'  => -1,
   );
 
+  // Settings.
+  $items['admin/config/workbench/scheduler/settings'] = array(
+    'title' => 'Settings',
+    'description' => 'Manage workbench scheduler settings',
+    'type' => MENU_LOCAL_TASK,
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('workbench_scheduler_admin_settings_page'),
+    'access arguments' => array('administer workbench schedules'),
+    'file' => 'workbench_scheduler.admin.inc',
+  );
+
   // Add schedule.
   $items['admin/config/workbench/scheduler/schedules/add'] = array(
     'title' => 'Add Schedule',
-    'description' => 'Create a new schedule.',
-    'type' => MENU_LOCAL_TASK,
+    'description' => 'Add Schedule',
+    'type' => MENU_LOCAL_ACTION,
     'page callback' => 'drupal_get_form',
     'page arguments' => array('workbench_scheduler_admin_edit_schedule'),
     'access arguments' => array('administer workbench schedules'),
@@ -96,7 +107,7 @@ function workbench_scheduler_menu() {
  */
 function workbench_scheduler_manage_schedules_access_check() {
   // First make sure user has access.
-  if (user_access('set workbench schedule')) {
+  if (user_access('view schedule history')) {
     // Attempt to load schedule types and node.
     if (($types = workbench_scheduler_get_types()) && ($node = node_load(arg(1)))) {
       // Check if node is a schedule type.
@@ -105,6 +116,109 @@ function workbench_scheduler_manage_schedules_access_check() {
   }
 
   return FALSE;
+}
+
+/**
+ * Checks to see if user has access to set any schedules.
+ *
+ * @return bool
+ *   Return boolean value.
+ */
+function workbench_scheduler_set_schedules_access_check($schedule = NULL) {
+  // Can user access any schedule?
+  if (user_access('set any workbench schedule')) {
+    return TRUE;
+  }
+
+  // Can user access provided schedule?
+  if (!empty($schedule)) {
+    if (user_access('set workbench schedule for ' . $schedule->name)) {
+      return TRUE;
+    }
+  }
+  // Can user access any specific schedule?
+  else {
+    $schedules = workbench_scheduler_schedules_load();
+    foreach ($schedules as $schedule) {
+      if (user_access('set workbench schedule for ' . $schedule->name)) {
+        return TRUE;
+      }
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Helper function for handling workbench scheduler permissions.
+ *
+ * @param $op
+ *    The operation permission (ex: set or view).
+ * @param $schedule
+ *    The workbench schedule.
+ * @param $node
+ *    The node being viewed or edited.
+ * @return bool
+ *    Return a boolean value.
+ */
+function workbench_scheduler_schedule_access($op, $schedule = NULL) {
+
+  switch($op) {
+    case 'set':
+      return workbench_scheduler_set_schedules_access_check($schedule);
+      break;
+    case 'view':
+      return user_access('view any workbench schedule');
+      break;
+  }
+
+}
+
+/**
+ * Helper function for checking schedule permissions on node.
+ *
+ * @param $op
+ * @param $node
+ */
+function workbench_scheduler_node_schedule_access($op, $node, $schedule = NULL) {
+
+  $access = &drupal_static(__FUNCTION__);
+
+  $access_empty = empty($access[$op]) || (!empty($schedule) && empty($access[$op][$schedule->name]));
+
+  if ($access_empty) {
+    global $user;
+
+    // Get qualifying schedules for this node.
+    $schedules = workbench_scheduler_type_schedules_load($node->type);
+
+    // Loop through each schedule and allow modules to override any permissions.
+    if (!empty($schedules)) {
+      foreach ($schedules as $schedule_obj) {
+
+        // Allow modules to override access permissions.
+        foreach (module_implements('workbench_scheduler_node_schedule_access') as $module) {
+          $override = module_invoke($module, 'workbench_scheduler_node_schedule_access', $node, $schedule_obj, $op, $user);
+          if (is_bool($override)) {
+            $access[$op][$schedule_obj->name] = $override;
+          }
+        }
+      }
+    }
+  }
+
+  if (!empty($access[$op])) {
+    if (isset($schedule_obj) && isset($access[$op][$schedule_obj->name])) {
+      return $access[$op][$schedule_obj->name];
+    }
+
+    // Checking values. If all schedules are set to FALSE then access is denied.
+    $filtered = array_filter($access[$op]);
+    return !empty($filtered);
+  }
+
+  // If no hooks are overriding the permissions then use defaults.
+  return workbench_scheduler_schedule_access($op, $schedule);
 }
 
 /**
@@ -132,19 +246,29 @@ function workbench_scheduler_permission() {
     'title' => t('Administer workbench schedules'),
   );
 
-  // Expand for each content type.
-  $permissions['set workbench schedule'] = array(
-    'title' => t('Set workbench schedule'),
-  );
-
   $permissions['set any workbench schedule'] = array(
     'title' => t('Set any workbench schedule'),
   );
 
-  if ($schedules = workbench_scheduler_load_schedules()) {
+  $permissions['use workbench_scheduler scheduled content tab'] = array(
+    'title' => t('Use "Scheduled Content" workbench tab')
+  );
+
+  // View any workbench schedule.
+  $permissions['view any workbench schedule'] = array(
+    'title' => t('View any workbench schedule'),
+  );
+
+   // View schedules history.
+  $permissions['view schedule history'] = array(
+    'title' => t('View schedule history'),
+  );
+
+  if ($schedules = workbench_scheduler_schedules_load()) {
     foreach ($schedules as $schedule) {
+      // Set specific workbench schedule.
       $permissions['set workbench schedule for ' . $schedule->name] = array(
-        'title' => t('Set workbench schedule for "@label"', array(
+        'title' => t('Set workbench schedule for <em>@label</em>', array(
             '@label' => $schedule->label,
           )
         ),
@@ -162,17 +286,16 @@ function workbench_scheduler_action_info() {
   module_load_include('inc', 'workbench_scheduler', 'actions/workbench_scheduler.action');
 
   return array(
-    'workbench_scheduler_schedules_action' => array(
-      'type' => 'node',
-      'label' => t('Set Workbench schedule to a node'),
-      'behavior' => array('changes_property'),
-      'configurable' => FALSE,
-      'vbo_configurable' => TRUE,
-      'triggers' => array('any'),
-    ),
+     'workbench_scheduler_schedules_action' => array(
+        'type' => 'node',
+        'label' => t('Set Workbench schedule to a node'),
+        'behavior' => array('changes_property'),
+        'configurable' => FALSE,
+        'vbo_configurable' => TRUE,
+        'triggers' => array('any'),
+      ),
   );
 }
-
 /**
  * Implements hook_node_load().
  */
@@ -197,22 +320,14 @@ function workbench_scheduler_node_load($nodes, $types) {
 }
 
 /**
- * Implements hook_node_insert().
- */
-function workbench_scheduler_node_insert($node) {
-  if (isset($node->workbench_schedule)) {
-    // Save the schedule.
-    workbench_scheduler_save_node_schedule($node->nid, $node->vid, (array) $node->workbench_schedule);
-  }
-}
-
-/**
  * Implements hook_node_update().
  */
 function workbench_scheduler_node_update($node) {
   if (isset($node->workbench_schedule)) {
     // Update the schedule.
-    workbench_scheduler_save_node_schedule($node->nid, $node->vid, (array) $node->workbench_schedule);
+    foreach ($node->workbench_schedule as $schedule) {
+      workbench_scheduler_save_node_schedule($node->nid, $node->vid, (array) $schedule);
+    }
   }
 }
 
@@ -245,147 +360,193 @@ function workbench_scheduler_node_revision_delete($node) {
  * Implements hook_form_FORM_ID_alter().
  */
 function workbench_scheduler_form_node_form_alter(&$form, &$form_state, $form_id) {
+
+  // Loading the form node.
+  $node = $form['#node'];
+
   // Does the user have permission to set schedules?
-  $user_permission = user_access('set workbench schedule');
+  $user_permission = workbench_scheduler_node_schedule_access('set', $node) || workbench_scheduler_node_schedule_access('view', $node);
+
   // And are there any schedules for this node type?
-  $type_schedules = workbench_scheduler_load_type_schedules($form['#node']->type);
-  if ($user_permission && $type_schedules) {
+  $type_schedules = workbench_scheduler_type_schedules_load($node->type);
+  // Only allow schedule if this content type is moderated.
+  $types_moderated = workbench_moderation_moderate_node_types();
+  $is_moderated = (in_array($node->type, $types_moderated)) ? TRUE : FALSE;
+
+  $node_schedules = (!empty($node->workbench_schedule)) ? $node->workbench_schedule : FALSE;
+
+  if ($user_permission && $type_schedules && $is_moderated) {
+
+    // Build array of data being passed to settings in javascript.
+    $schedule_data = array();
+
+    // Build an options array for which schedules to choose.
+    $schedule_options = array();
+
+    // Retrieve a list of human safe moderation state names.
+    $moderation_states = workbench_scheduler_state_labels();
+
+    // Loading transitions.
+    $transitions = workbench_moderation_transitions();
+
+    // Setting selected schedules.
+    $selected_schedules = array();
+    if (!empty($node_schedules)) {
+      foreach ($node_schedules as $node_schedule) {
+        // Only render schedules that haven't elapsed.
+        // This is to allow content editors to assign schedules to new drafts.
+        if (!$node_schedule->completed) {
+          $selected_schedules[$node_schedule->sid] = TRUE;
+        }
+      }
+    }
+
     // Add a scheduler section.
     $form['workbench_scheduler'] = array(
       '#type' => 'fieldset',
       '#title' => t('Workbench Schedule'),
-      '#description' => t('Select a schedule for changing moderation states.'),
       '#collapsible' => TRUE,
       '#collapsed' => TRUE,
       '#group' => 'additional_settings',
-      '#access' => user_access('set workbench schedule'),
       '#attached' => array(
         'js' => array(drupal_get_path('module', 'workbench_scheduler') . '/js/workbench_scheduler.js'),
       ),
     );
 
-    // Build an options array for which schedules to choose.
-    $schedule_options = array();
-    // Add default option of no schedule.
-    $schedule_options[] = array(
-      'label' => t('No Schedule'),
-      'start_state' => '',
-      'end_state' => '',
-    );
+    // Setting schedule arrays for table and fieldsets.
+    foreach ($type_schedules as $sid => $schedule) {
 
-    // Retrieve a list of human safe moderation state names.
-    $moderation_states = workbench_scheduler_state_labels();
+      $set_schedule_permitted = workbench_scheduler_node_schedule_access('set', $node, $schedule);
 
-    // Add each type schedule to the options array.
-    foreach ($type_schedules as $schedule) {
-      if (user_access('set any workbench schedule') || user_access('set workbench schedule for ' . $schedule->name)) {
+      // TODO: These new permission refactoring needs testing.
+      // If no set permissions check view permissions.
+      if (!$set_schedule_permitted) {
+        // If no view permissions then skip.
+        if(!workbench_scheduler_node_schedule_access('view', $node, $schedule)) {
+          continue;
+        }
+        // If view permission but no data exists then skip again.
+        elseif(workbench_scheduler_node_schedule_access('view', $node, $schedule)
+          && empty($selected_schedules[$sid])) {
+          continue;
+        }
+      }
+
+      unset($transition);
+      if (!empty($schedule->transition)) {
+        foreach ($transitions as $transition) {
+          if ($transition->id == $schedule->transition) {
+            break;
+          }
+        }
+      }
+
+      // Final array for rendering schedule fieldsets and their dates.
+      $schedule_data[] = array(
+        'sid' => $schedule->sid,
+        'label' => $schedule->label,
+        'name' => $schedule->name,
+        'transition' => (!empty($transition)) ? $transition->id : '',
+        'from_name' => (!empty($transition) && !empty($moderation_states[$transition->from_name])) ? $moderation_states[$transition->from_name] : '',
+        'to_name' => (!empty($transition) && !empty($moderation_states[$transition->to_name])) ? $moderation_states[$transition->to_name] : '',
+      );
+
+      // Checking permissions for setting schedules.
+      // Added to schedules table.
+      if ($set_schedule_permitted) {
         $schedule_options[$schedule->sid] = array(
           'label' => $schedule->label,
-          'start_state' => (!empty($schedule->start_state) ? $moderation_states[$schedule->start_state] : ''),
-          'end_state' => (!empty($schedule->end_state) ? $moderation_states[$schedule->end_state] : ''),
+          'name' => $schedule->name,
+          'transition' => (!empty($transition)) ? $transition->id : '',
+          'from_name' => (!empty($transition) && !empty($moderation_states[$transition->from_name])) ? $moderation_states[$transition->from_name] : '',
+          'to_name' => (!empty($transition) && !empty($moderation_states[$transition->to_name])) ? $moderation_states[$transition->to_name] : '',
         );
       }
     }
 
     // Add schedules to JavaScript settings.
     $form['workbench_scheduler']['#attached']['js'][] = array(
-      'data' => array('workbench_scheduler' => array('schedules' => $schedule_options)),
+      'data' => array('workbench_scheduler' => array('schedules' => $schedule_data)),
       'type' => 'setting',
     );
 
-    // Create table select for selecting schedule.
-    $form['workbench_scheduler']['workbench_scheduler_sid'] = array(
-      '#type' => 'tableselect',
-      '#title'  => t('Select Schedule'),
-      '#description' => t('Select the schedule to use for this node.'),
-      '#options' => $schedule_options,
-      '#multiple' => FALSE,
-      '#header' => array(
-        'label' => t('Name'),
-        'start_state' => t('Start State'),
-        'end_state' => t('End State'),
-      ),
-    );
+    // Schedule options will have data if it exists and user has permissions.
+    if (!empty($schedule_options)) {
 
-    // Fieldset for collecting schedule dates.
-    $form['workbench_scheduler']['dates'] = array(
-      '#type' => 'fieldset',
-      '#title' => t('Schedule Dates'),
-      '#description' => t('Select the start and/or end dates to trigger states changes for this node.'),
-      '#states' => array(
-        'invisible' => array(
-          ':input[name=workbench_scheduler_sid]' => array('value' => '0'),
+      // Table select for choosing different schedule types.
+      $form['workbench_scheduler']['workbench_scheduler_sid'] = array(
+        '#type' => 'tableselect',
+        '#title'  => t('Select Schedule'),
+        '#description' => t('Select the schedule to use for this node.'),
+        '#options' => $schedule_options,
+        '#default_value' => $selected_schedules,
+        '#multiple' => TRUE,
+        '#header' => array(
+          'label' => t('Name'),
+          'from_name' => t('When content state is. . .'),
+          'to_name' => t('Set content state to. . .'),
         ),
-      ),
-    );
-
-    // Start date.
-    $form['workbench_scheduler']['dates']['workbench_scheduler_start_date'] = array(
-      '#type' => 'date_popup',
-      '#date_format' => 'Y-m-d H:i',
-      '#title' => t('Start date'),
-      '#description' => t('Select the date to switch this node to the scheduled "start state"'),
-    );
-
-    // End date.
-    $form['workbench_scheduler']['dates']['workbench_scheduler_end_date'] = array(
-      '#type' => 'date_popup',
-      '#date_format' => 'Y-m-d H:i',
-      '#title' => t('End date'),
-      '#description' => t('Select the date to switch this node to the scheduled "end state"'),
-    );
-
-    $node_schedule = isset($form['#node']->workbench_schedule) ? $form['#node']->workbench_schedule : FALSE;
-    // Have a node schedule(editing a node)? Use for defaults.
-    if ($node_schedule) {
-      $form['workbench_scheduler']['workbench_scheduler_sid']['#default_value'] = $node_schedule->sid;
-
-      if ($node_schedule->start_date) {
-        // Format date for field.
-        $start_date = format_date($node_schedule->start_date, 'custom', 'Y-m-d H:i:s');
-        $form['workbench_scheduler']['dates']['workbench_scheduler_start_date']['#default_value'] = $start_date;
-      }
-
-      if ($node_schedule->end_date) {
-        // Format date for field.
-        $end_date = format_date($node_schedule->end_date, 'custom', 'Y-m-d H:i:s');
-        $form['workbench_scheduler']['dates']['workbench_scheduler_end_date']['#default_value'] = $end_date;
-      }
+        '#attributes' => array(
+        'class' => array('workbench-schedule-sid'),
+        ),
+      );
     }
 
-    // Display message depending on schedule settings.
-    $msg = '';
+    foreach ($schedule_data as $schedule) {
+      $sid = $schedule['sid'];
 
-    $type_settings = variable_get('workbench_scheduler_' . $form['#node']->type, array());
-    // Check if only process latest revision.
-    if (in_array('workbench_scheduler_limit_current_revision', $type_settings)) {
-      $msg = t('Only the schedule for the most recent revision will be run.');
-    }
-    elseif (isset($form['#node']->nid)) {
-      // Check if there are existing active schedules.
-      $active_schedules = workbench_scheduler_count_node_schedules($form['#node']->nid, 'active');
-      // Schedules set?
-      if ($active_schedules > 0) {
-        // Display message about active schedules.
-        $msg = format_plural($active_schedules,
-          'There is still 1 active schedule for a previous revision. !link',
-          'There are still @count active schedules for previous revisions. !link',
-          array('!link' => l(t('Review Schedules'), 'node/' . $form['#node']->nid . '/manage_schedules')));
+      // Fieldset for collecting schedule dates.
+      $form['workbench_scheduler']['dates'][$sid] = array(
+        '#type' => 'fieldset',
+        '#title' => $schedule['label'],
+        '#states' => array(
+          'visible' => array(
+            ':input[name="workbench_scheduler_sid[' . $sid . ']"]' => array('checked' => TRUE),
+          ),
+        ),
+      );
+
+      // Date/time fields.
+      $form['workbench_scheduler']['dates'][$sid]['workbench_scheduler_date']['#tree'] = TRUE;
+      $form['workbench_scheduler']['dates'][$sid]['workbench_scheduler_date'][$sid] = array(
+        '#type' => 'date_popup',
+        '#date_format' => workbench_scheduler_date_format(),
+        '#title' =>  t('Set content to ') . $schedule['to_name'] . t(' after . . .'),
+        '#description' => t('Note: This schedule will only run when the current moderation state is') .' <strong>'. $schedule['from_name'] . '</strong>.',
+      );
+
+      // if user does not have set access but has view access.
+      $schedule_obj = workbench_scheduler_schedules_load($schedule['sid']);
+      if (!workbench_scheduler_node_schedule_access('set', $node, $schedule_obj) && workbench_scheduler_node_schedule_access('view', $node, $schedule_obj)) {
+        unset($form['workbench_scheduler']['dates'][$sid]['#states']);
+        $form['workbench_scheduler']['dates'][$sid]['workbench_scheduler_date'][$sid]['#disabled'] = TRUE;
+      }
+
+      // Have a node schedule(editing a node)? Use for defaults.
+      // Do not use data from completed schedules.
+      if (!empty($node_schedules)) {
+        foreach ($node_schedules as $node_schedule) {
+          if (!empty($node_schedule) && $node_schedule->sid == $sid && $node_schedule->date && !$node_schedule->completed) {
+            // Format date for field.
+            $date = format_date($node_schedule->date, 'custom', DATE_FORMAT_DATETIME);
+            $form['workbench_scheduler']['dates'][$sid]['workbench_scheduler_date'][$sid]['#default_value'] = $date;
+          }
+        }
       }
     }
 
-    if ($msg) {
-      $form['workbench_scheduler']['note'] = array(
-        '#type' => 'item',
-        '#title' => t('Note'),
-        '#markup' => $msg,
+    if (empty($schedule_data)) {
+      $form['workbench_scheduler']['empty'] = array(
+        '#type' => 'fieldset',
+        '#title' => t('No Schedules Set'),
+        '#description' => t('There are no upcoming scheduled transitions for this content.'),
       );
     }
 
     // Add custom validation and submission hooks.
     $form['#validate'][] = 'workbench_scheduler_node_form_validate';
-    // Add to submit button action so that will have access to the new,
-    // Nid & vid values.
+
+    // Add to submit button action so that will have access to the new nid and vid values.
     $form['actions']['submit']['#submit'][] = 'workbench_scheduler_node_form_submit';
   }
 }
@@ -399,44 +560,34 @@ function workbench_scheduler_form_node_form_alter(&$form, &$form_state, $form_id
  *   The form state array.
  */
 function workbench_scheduler_node_form_validate($form, &$form_state) {
+  $values = $form_state['values'];
+  if (!empty($values['workbench_scheduler_sid'])) {
+    foreach ($values['workbench_scheduler_sid'] as $sid) {
+      if (!empty($values['workbench_scheduler_date'][$sid])) {
+        $date = $values['workbench_scheduler_date'][$sid];
+      }
+      else {
+        $date = '';
+      }
 
-  if (!empty($form_state['values']['workbench_scheduler_start_date'])) {
-    $start_date = $form_state['values']['workbench_scheduler_start_date'];
-  }
-  else {
-    $start_date = '';
-  }
+      // Was a schedule selected?
+      if ($sid && ($sid > 0)) {
 
-  if (!empty($form_state['values']['workbench_scheduler_end_date'])) {
-    $end_date   = $form_state['values']['workbench_scheduler_end_date'];
-  }
-  else {
-    $end_date = '';
-  }
-
-  // Retrieve schedule data.
-  $sid = $form_state['values']['workbench_scheduler_sid'];
-
-  // Was a schedule selected?
-  if ($sid && ($sid > 0)) {
-    // Both a start date and an end date, start should be before end.
-    if (($start_date && $end_date) && $start_date >= $end_date) {
-      form_set_error('workbench_scheduler_end_date', t('End date must be after start date.'));
-    }
-    // Need to make sure either a start date or end date was selected.
-    elseif ($start_date || $end_date) {
-      // All good.
-    }
-    else {
-      // Only other option, are no dates. throw an error.
-      form_set_error('workbench_scheduler_start_date', t('Must provide either a start date or end date for workbench schedule'));
-    }
-  }
-  // No sid however was a start date or end date selected?
-  elseif ($start_date || $end_date) {
-    if ($form_state['values']['workbench_scheduler_sid'] != 0) {
-      // Need to select a schedule for the dates unless none were selected.
-      form_set_error('workbench_scheduler_sid', t('Must select a workbench schedule to apply to the provided date(s)'));
+        if (!empty($date)) {
+          // All good.
+        }
+        else {
+          // Only other option, are no dates. throw an error.
+          form_set_error('workbench_scheduler_date][' . $sid, t('Must provide date for workbench schedule'));
+        }
+      }
+      // No sid however was a start date or end date selected?
+      elseif (!empty($date)) {
+        if ($form_state['values']['workbench_scheduler_sid'] != 0) {
+          // Need to select a schedule for the dates unless none were selected.
+          form_set_error('workbench_scheduler_sid][' . $sid, t('Must select a workbench schedule to apply to the provided date(s)'));
+        }
+      }
     }
   }
 }
@@ -450,40 +601,39 @@ function workbench_scheduler_node_form_validate($form, &$form_state) {
  *   The form state array.
  */
 function workbench_scheduler_node_form_submit($form, &$form_state) {
-  if (!empty($form_state['values']['workbench_scheduler_start_date'])) {
-    $start_date = $form_state['values']['workbench_scheduler_start_date'];
-  }
-  else {
-    $start_date = '';
-  }
-
-  if (!empty($form_state['values']['workbench_scheduler_end_date'])) {
-    $end_date   = $form_state['values']['workbench_scheduler_end_date'];
-  }
-  else {
-    $end_date = '';
-  }
-
-  // Retrieve schedule data.
-  $schedule_data = array(
-    'sid' => $form_state['values']['workbench_scheduler_sid'],
-    // Format to timestamp for storage.
-    'start_date' => strtotime($start_date),
-    // Format to timestamp for storage.
-    'end_date' => strtotime($end_date),
-  );
   // Get the node data from the form state.
   $nid = $form_state['node']->nid;
   $vid = $form_state['node']->vid;
 
-  // Have a schedule selected? sid of 0 for removing a schedule.
-  if ($schedule_data['sid'] || $schedule_data['sid'] == 0) {
-    // Attempt to save the schedule for this node.
-    if (workbench_scheduler_save_node_schedule($nid, $vid, $schedule_data)) {
-      // Success.
-    }
-    else {
-      drupal_set_message(t('Error saving workbench schedule for node'), 'error', FALSE);
+  if (!empty($form_state['values']['workbench_scheduler_sid'])) {
+    foreach ($form_state['values']['workbench_scheduler_sid'] as $sid => $sid_enabled) {
+
+      if (!empty($form_state['values']['workbench_scheduler_date'][$sid])) {
+        $date = $form_state['values']['workbench_scheduler_date'][$sid];
+      }
+      else {
+        $date = '';
+      }
+
+      // Have a schedule selected?
+      if ($sid_enabled) {
+        // Retrieve schedule data.
+        $schedule_data = array(
+          'sid' => $sid,
+          // Format to timestamp for storage.
+          'date' => strtotime($date),
+        );
+        // Attempt to save the schedule for this node.
+        if (workbench_scheduler_save_node_schedule($nid, $vid, $schedule_data)) {
+          // Success.
+        }
+        else {
+          drupal_set_message(t('Error saving workbench schedule for node'), 'error', FALSE);
+        }
+      }
+      else {
+        workbench_scheduler_delete_node_schedule($nid, $vid, $sid);
+      }
     }
   }
 }
@@ -509,10 +659,9 @@ function _workbench_scheduler_run() {
   if (workbench_scheduler_schedules_exist()) {
     // Run scheduler.
     $curr_time = time();
-    // Process the start date schedules.
-    $count += workbench_scheduler_process_start_dates($curr_time);
-    // Process the end date schedules.
-    $count += workbench_scheduler_process_end_dates($curr_time);
+
+    // Process the schedules.
+    $count += workbench_scheduler_process_dates($curr_time);
   }
 
   return $count;
@@ -526,6 +675,29 @@ function workbench_scheduler_views_api() {
 }
 
 /**
+ * Implements hook_views_default_views().
+ */
+function workbench_scheduler_views_default_views() {
+  $module = 'workbench_scheduler';
+  $directory = 'views';
+  $extension = 'view.inc';
+  $name = 'view';
+
+  // From workbench_load_all_exports().
+  $return = array();
+  // Find all the files in the directory with the correct extension.
+  $files = file_scan_directory(drupal_get_path('module', $module) . "/$directory", "/.$extension/");
+  foreach ($files as $path => $file) {
+    require $path;
+    if (isset($$name)) {
+      $return[$$name->name] = $$name;
+    }
+  }
+
+  return $return;
+}
+
+/**
  * Retrieve a list of all the content types associated to schedules.
  *
  * @return mixed
@@ -535,6 +707,7 @@ function workbench_scheduler_get_types() {
   $types = &drupal_static(__FUNCTION__);
 
   if (!isset($types)) {
+    $types = array();
     // Build select query to retrieve all distinct content types,
     // In the workbench_scheduler_types table.
     $types_query = db_select('workbench_scheduler_types', 'wst')
@@ -599,6 +772,13 @@ function workbench_scheduler_state_labels() {
 }
 
 /**
+ * Get the current date format.
+ */
+function workbench_scheduler_date_format() {
+    return variable_get('workbench_scheduler_settings_date_format', date_format_type_format('short'));
+}
+
+/**
  * Generate an array of schedule machine names.
  *
  * @return array
@@ -623,59 +803,53 @@ function workbench_scheduler_schedule_names() {
 }
 
 /**
- * Return an array of counts of schedules for a specific node.
- *
- * @param int $nid
- *   Node id.
- * @param bool|string $status
- *   Which status to return counts.
- *
- * @return int
- *   Return count of schedules.
+ * Fetches all active schedules.
  */
-function workbench_scheduler_count_node_schedules($nid, $status = FALSE) {
-  $counts = array(
-    'active' => 0,
-    'completed' => 0,
-  );
+function _workbench_scheduler_process_node_schedules(&$node_schedules) {
+  // If scheduled nodes are returned from the query.
+  if (!empty($node_schedules)) {
+    foreach ($node_schedules as $node_schedule) {
 
-  // Select from the workbench_scheduler_nodes table.
-  $node_schedules = db_select('workbench_scheduler_nodes', 'wsn')
-  // Retrieve nid.
-    ->fields('wsn', array('nid'));
-  // Retrieve count of completed.
-  $node_schedules->addExpression('SUM(wsn.completed)', 'completed_schedules');
-  // Retrieve count of active (count of completed - sum).
-  $node_schedules->addExpression('(COUNT(wsn.completed) - SUM(wsn.completed))', 'active_schedules');
-  // WHERE node id matches this node id.
-  $node_schedules->condition('wsn.nid', $nid)
-  // GROUP BY nid.
-    ->groupBy('wsn.nid')
-  // Return single row, save comutation time.
-    ->range(0, 1);
-  // Execute.
-  $node_schedules = $node_schedules->execute();
+      $node_schedule->active = FALSE;
 
-  // Returned results?
-  if ($node_schedules->rowCount()) {
-    // Gather data from first result.
-    $result = $node_schedules->fetchObject();
+      // Getting the current revision.
+      $node = node_load($node_schedule->nid);
 
-    $counts['completed'] = $result->completed_schedules;
-    $counts['active'] = $result->active_schedules;
-  }
+      // If node schedule vid is the same as the current revision.
+      $current_revision = ($node_schedule->vid == $node->workbench_moderation['current']->vid);
 
-  // Only want count for a specific status?
-  if ($status) {
-    if (isset($counts[$status])) {
-      return $counts[$status];
+      // If schedule is not completed.
+      $not_completed = $node_schedule->completed == 0;
+
+      // Set node property.
+      $node_schedule->node = $node;
+
+      // Load schedule data for developers.
+      $node_schedule->schedule = workbench_scheduler_schedules_load($node_schedule->sid);
+
+      // Checking to make sure node type supports schedules.
+      $schedule_check = workbench_scheduler_type_schedules_load($node->type);
+      $type_supported = !empty($schedule_check);
+
+      if ($not_completed && $current_revision && $type_supported) {
+        $node_schedule->active = TRUE;
+      }
+
+      // Is 'Run schedules on published revisions' enabled?
+      if(variable_get('workbench_scheduler_settings_published_revisions')) {
+        // If node schedule vid is the same as the published revision.
+        if ($type_supported
+          && !empty($node->workbench_moderation['published'])
+          && $node->workbench_moderation['published']->vid == $node_schedule->vid) {
+          $node_schedule->active = TRUE;
+        }
+      }
+
+      // Allow modules to alter active schedules.
+      drupal_alter('workbench_scheduler_process_node_schedule', $node_schedule);
+
     }
-    else {
-      return 0;
-    }
   }
-
-  return array_sum($counts);
 }
 
 /**
@@ -690,33 +864,38 @@ function workbench_scheduler_count_node_schedules($nid, $status = FALSE) {
  *   Return an array of scheduler data for the node, or boolean TRUE
  *    if there is no schedule for this node.
  */
-function workbench_scheduler_load_node_schedule($nid, $vid) {
+function workbench_scheduler_load_node_schedule($nid, $vid = NULL) {
   // Select from the workbench_scheduler_nodes table.
   $node_schedule_query = db_select('workbench_scheduler_nodes', 'wsn');
-  // Join the workbench_scheduler_schedule table on the schedule id.
-  $node_schedule_query->innerjoin('workbench_scheduler_schedules', 'wss', 'wsn.sid = wss.sid');
   // Retrieve the node start and end date.
   $node_schedule_query->fields('wsn', array(
-    'start_date',
-    'end_date',
+    'nid',
+    'vid',
+    'sid',
+    'date',
     'completed',
     )
-  )
-  // Retrieve all data for the schedule.
-    ->fields('wss');
+  );
+
   // WHERE node id matches this node id.
-  $node_schedule_query->condition('wsn.nid', $nid)
+  $node_schedule_query->condition('wsn.nid', $nid);
   // AND node revision id matches this node revision.
-    ->condition('wsn.vid', $vid)
-  // AND schedule not completed
-  // ->condition('wsn.completed', 0)
+  if ($vid) {
+    $node_schedule_query->condition('wsn.vid', $vid);
+  }
+
   // Only return the first result.
-    ->range(0, 1);
+  $node_schedule_query->orderby('wsn.date', 'ASC');
+
   $node_schedule = $node_schedule_query->execute();
 
   // Was data successfully retrieve?
   if ($node_schedule->rowCount()) {
-    return $node_schedule->fetchObject();
+    $schedule = array();
+    while ($data = $node_schedule->fetchObject()) {
+      $schedule[] = $data;
+    }
+    return $schedule;
   }
   // Return a boolean false if nothing is retrieved.
   return FALSE;
@@ -737,20 +916,22 @@ function workbench_scheduler_load_node_schedule($nid, $vid) {
  */
 function workbench_scheduler_save_node_schedule($nid, $vid, $schedule_data) {
   // Need to have the sid and start date  or end date data.
-  if (isset($schedule_data['sid']) && ($schedule_data['sid'] == 0 || $schedule_data['start_date'] || $schedule_data['end_date'])) {
-    if ($schedule_data['sid'] != 0) {
+  // Do no save already completed schedules.
+  if (isset($schedule_data['sid'])
+      && $schedule_data['date']
+      && empty($schedule_data['completed'])) {
+
       // Run a merge query to insert or update the row.
       $merge = db_merge('workbench_scheduler_nodes')
         ->key(array(
             'nid' => $nid,
             'vid' => $vid,
+            'sid' => $schedule_data['sid'],
           ))
         ->fields(array(
             'sid' => $schedule_data['sid'],
             // Start date if it was passed.
-            'start_date' => $schedule_data['start_date'] ? $schedule_data['start_date'] : 0,
-            // End if it was passed.
-            'end_date' => $schedule_data['end_date'] ? $schedule_data['end_date'] : 0,
+            'date' => $schedule_data['date'] ? $schedule_data['date'] : 0,
           ))
         ->execute();
 
@@ -758,16 +939,12 @@ function workbench_scheduler_save_node_schedule($nid, $vid, $schedule_data) {
       if ($merge) {
         // Apply update hooks.
         module_invoke_all('workbench_scheduler_post_save_node_schedule', $nid, $vid, $schedule_data);
+        // Clear the cache to ensure the node edit form is accurate.
+        entity_get_controller('node')->resetCache(array($nid));
         return TRUE;
       }
-    }
-    elseif ($schedule_data['sid'] == 0) {
-      // Make sure the this revision has no schedule.
-      workbench_scheduler_delete_node_schedule($nid, $vid);
-      // Schedule_data removed.
-      return TRUE;
-    }
   }
+
   // Return boolean false if missing fields or failed query.
   return FALSE;
 }
@@ -801,6 +978,8 @@ function workbench_scheduler_delete_node_schedule($nid, $vid = 0, $sid = 0) {
 
   if ($delete) {
     module_invoke_all('workbench_scheduler_post_delete_node_schedule', $nid, $vid, $sid);
+    // Clear the cache to ensure the node edit form is accurate.
+    entity_get_controller('node')->resetCache(array($nid));
     return $delete;
   }
 }
@@ -834,7 +1013,8 @@ function workbench_scheduler_node_set_complete($nid, $vid, $sid) {
  * @return mixed
  *   An array of schedule objects or boolean false.
  */
-function workbench_scheduler_load_type_schedules($types) {
+function workbench_scheduler_type_schedules_load($types) {
+
   $schedules = &drupal_static(__FUNCTION__);
 
   // Check to see if only retrieving for a single type.
@@ -864,17 +1044,18 @@ function workbench_scheduler_load_type_schedules($types) {
   // Only need to perform query if no schedules or missing types.
   if (!$schedules || (count($schedules) < 1) || (count($missing_types) > 0)) {
     // Retrieve machine name of schedules for types.
-    $schedules_query = db_select('workbench_scheduler_types', 'wst')
-      ->fields('wst')
-      ->condition('wst.type', $missing_types, 'IN')
-      ->execute();
-
-    // Retrieved results?
-    if ($schedules_query->rowCount()) {
-      // Add the schedules to the array.
-      foreach ($schedules_query as $type_schedule) {
-        $schedule = workbench_scheduler_load_schedules($type_schedule->name);
-        $schedules[$type_schedule->type][$schedule->sid] = $schedule;
+    if (!empty($missing_types)) {
+      $schedules_query = db_select('workbench_scheduler_types', 'wst')
+        ->fields('wst')
+        ->condition('wst.type', $missing_types, 'IN')
+        ->execute();
+      // Retrieved results?
+      if (!empty($schedules_query) && $schedules_query->rowCount()) {
+        // Add the schedules to the array.
+        foreach ($schedules_query as $type_schedule) {
+          $schedule = workbench_scheduler_machine_name_schedules_load($type_schedule->name);
+          $schedules[$type_schedule->type][$schedule->sid] = $schedule;
+        }
       }
     }
   }
@@ -902,7 +1083,7 @@ function workbench_scheduler_load_type_schedules($types) {
 }
 
 /**
- * Retrieve an array of schedule data.
+ * Retrieve an array of schedule data by machine name.
  *
  * @param mixed $names
  *   Machine name of a schedule or array of machine names (optional).
@@ -910,37 +1091,77 @@ function workbench_scheduler_load_type_schedules($types) {
  * @return mixed
  *   An array of schedule data or boolean FALSE.
  */
-function workbench_scheduler_load_schedules($names = FALSE) {
+function workbench_scheduler_machine_name_schedules_load($names) {
+  // Make argument an array.
+  $get_single = FALSE;
+  if (!is_array($names)) {
+    $get_single = TRUE;
+    $names = array($names);
+  }
+
+  $schedules_query = db_select('workbench_scheduler_schedules', 'wss');
+  $schedules_query->fields('wss', array('sid'));
+  $schedules_query->condition('wss.name', $names, 'IN');
+
+  // Perform the query.
+  $sids = $schedules_query->execute()->fetchCol('sid');
+
+  // Load complete schedule data.
+  if (!empty($sids)) {
+    if ($get_single) {
+      $sids = $sids[0];
+    }
+  }
+
+  return workbench_scheduler_schedules_load($sids);
+}
+/**
+ * Retrieve an array of schedule data by sid.
+ *
+ * @param mixed $sid
+ *   Sid of the schedule or an array of sids (optional).
+ *
+ * @return mixed
+ *   An array of schedule data or boolean FALSE.
+ */
+function workbench_scheduler_schedules_load($sids = FALSE) {
   $schedules = &drupal_static(__FUNCTION__);
 
   // Boolean to check if only retrieving a single schedule.
   $get_single = FALSE;
 
+  // make sure we only use $schedules with an "transition" attribute
   if ($schedules) {
-    // Create an array of the schedules names already retrieved.
-    $retrieved_names = array_keys($schedules);
+    $schedules = array_filter($schedules, function($schedule) {
+      return property_exists($schedule, 'transition');
+    });
   }
 
-  // Passed machine name(s) of schedules to retrieve?
-  if ($names) {
+  if ($schedules) {
+    // Create an array of the schedules names already retrieved.
+    $retrieved_sids = array_keys($schedules);
+  }
+
+  // Passed sids of schedules to retrieve?
+  if ($sids) {
     // Passed a single schedule name?
-    if (!is_array($names)) {
+    if (!is_array($sids)) {
       // Retrieving a single.
-      $get_single = $names;
+      $get_single = $sids;
       // Make it an array.
-      $names = array($names);
+      $sids = array($sids);
     }
     // Find out which of the schedules have not already been retrieved.
-    if (isset($retrieved_names)) {
-      $missing_names = array_diff($names, $retrieved_names);
+    if (isset($retrieved_sids)) {
+      $missing_sids = array_diff($sids, $retrieved_sids);
     }
     else {
-      $missing_names = $names;
+      $missing_sids = $sids;
     }
   }
 
   // Only need to query the DB if noe schedules, no names or missing names.
-  if (!$schedules || (count($schedules) < 1) || !isset($missing_names) || (count($missing_names) > 0)) {
+  if (!$schedules || (count($schedules) < 1) || !isset($missing_sids) || (count($missing_sids) > 0)) {
     // Build query to retrieve schedules.
     $schedules_query = db_select('workbench_scheduler_schedules', 'wss');
     // Left join the types table to get related content types based on.
@@ -951,15 +1172,15 @@ function workbench_scheduler_load_schedules($names = FALSE) {
     // Retrieve just the content type machine name from types table.
       ->fields('wst', array('type'));
     // Have missing names we want to only retrieve?
-    if (isset($missing_names)) {
+    if (isset($missing_sids)) {
       // Add condition to only retrieve these schedules.
-      $schedules_query->condition('wss.name', $missing_names, 'IN');
+      $schedules_query->condition('wss.sid', $missing_sids, 'IN');
     }
 
     // Have previously retrieved schedules?
-    if (isset($retrieved_names)) {
+    if (isset($retrieved_sids)) {
       // Add condition not to retrieve these.
-      $schedules_query->condition('wss.name', $retrieved_names, 'NOT IN');
+      $schedules_query->condition('wss.name', $retrieved_sids, 'NOT IN');
     }
 
     // Perform the query.
@@ -969,18 +1190,20 @@ function workbench_scheduler_load_schedules($names = FALSE) {
     if ($retrieved_schedules->rowCount()) {
       // Loop through the results.
       foreach ($retrieved_schedules as $schedule) {
+
         // Already retrieved the schedule?
-        if (isset($schedules[$schedule->name])) {
+        if (isset($schedules[$schedule->sid]) && !in_array($schedule->type, $schedules[$schedule->sid]->types)) {
+
           // Yes, then just add this content type to it.
-          $schedules[$schedule->name]->types[] = $schedule->type;
+          $schedules[$schedule->sid]->types[] = $schedule->type;
         }
         else {
           // No, add to schedules array.
-          $schedules[$schedule->name] = $schedule;
+          $schedules[$schedule->sid] = $schedule;
           // Add an array for the content types.
-          $schedules[$schedule->name]->types = array($schedule->type);
+          $schedules[$schedule->sid]->types = array($schedule->type);
           // Do not need the type attribute.
-          unset($schedules[$schedule->name]->type);
+          unset($schedules[$schedule->sid]->type);
         }
       }
     }
@@ -989,11 +1212,11 @@ function workbench_scheduler_load_schedules($names = FALSE) {
   // Have schedules to return?
   if ($schedules && count($schedules) > 0) {
     // Have a specific sub set of schedules ?
-    if ($names) {
+    if ($sids) {
       // Flip names to make it assoc.
-      $names = array_flip($names);
+      $sids = array_flip($sids);
       // Take only a sub section of the returned schedules.
-      $return_schedules = array_intersect_key($schedules, $names);
+      $return_schedules = array_intersect_key($schedules, $sids);
       // Only want a single schedule?
       if ($get_single) {
         // Is it present in the array?
@@ -1028,7 +1251,7 @@ function workbench_scheduler_load_schedules($names = FALSE) {
  */
 function workbench_scheduler_save_schedule($name, $schedule_data) {
   // Need to have the label, start_state and end_state.
-  if (isset($schedule_data['label']) && isset($schedule_data['start_state']) && isset($schedule_data['end_state'])) {
+  if (isset($schedule_data['label']) && isset($schedule_data['transition'])) {
     // Run a merge query to insert or update the row.
     $merge = db_merge('workbench_scheduler_schedules')
       ->key(array(
@@ -1036,8 +1259,7 @@ function workbench_scheduler_save_schedule($name, $schedule_data) {
       ))
       ->fields(array(
         'label'       => trim($schedule_data['label']),
-        'start_state' => trim($schedule_data['start_state']),
-        'end_state'   => trim($schedule_data['end_state']),
+        'transition' => trim($schedule_data['transition']),
       ))
       ->execute();
 
@@ -1062,8 +1284,8 @@ function workbench_scheduler_save_schedule($name, $schedule_data) {
         $insert_query->execute();
       }
       // Reset the statics.
-      drupal_static_reset('workbench_scheduler_load_schedules');
-      drupal_static_reset('workbench_scheduler_load_type_schedules');
+      drupal_static_reset('workbench_scheduler_schedules_load');
+      drupal_static_reset('workbench_scheduler_type_schedules_load');
       return $merge;
     }
   }
@@ -1125,8 +1347,8 @@ function workbench_scheduler_delete_schedules($names) {
   }
   else {
     // Reset the statics.
-    drupal_static_reset('workbench_scheduler_load_schedules');
-    drupal_static_reset('workbench_scheduler_load_type_schedules');
+    drupal_static_reset('workbench_scheduler_schedules_load');
+    drupal_static_reset('workbench_scheduler_type_schedules_load');
     return TRUE;
   }
 }
@@ -1148,7 +1370,7 @@ function workbench_scheduler_schedules_exist() {
 }
 
 /**
- * Run schedules for start times / states.
+ * Run schedules
  *
  * @param int $timestamp
  *   Timestamp to check against.
@@ -1156,210 +1378,104 @@ function workbench_scheduler_schedules_exist() {
  * @return int|bool
  *   Count of nodes that were processed or boolean FALSE.
  */
-function workbench_scheduler_process_start_dates($timestamp) {
-  // Fetch all nodes that need to have their states changed to the 'start_date'.
-  // State before NOW, and have not already done so.
-  // Instantiate a counter for number of nodes processed.
-  $count = 0;
-
-  // Select from the workbench_scheduler_nodes table.
-  $schedule_query = db_select('workbench_scheduler_nodes', 'wsn');
-
-  // Join node table to get 'type'.
-  $schedule_query->innerjoin('node', 'node', 'node.nid = wsn.nid');
-
-  // Inner join on workbench_scheduler_schedules table on schedule id.
-  $schedule_query->innerjoin('workbench_scheduler_schedules', 'wss', 'wsn.sid = wss.sid');
-
-  // Inner join on workbench_moderation_node_history table on nid, revision id.
-  // And where the current state does not equal the start state.
-  $schedule_query->innerjoin('workbench_moderation_node_history', 'wmnh', 'wsn.nid = wmnh.nid AND wsn.vid = wmnh.vid AND wss.start_state != wmnh.state');
-
-  // Join the node history table and grab highest vid of the highest hid.
-  $schedule_query->leftJoin('workbench_moderation_node_history', 'wmnh2', 'wmnh.nid = wmnh2.nid AND wmnh.vid = wmnh2.vid AND wmnh.hid < wmnh2.hid');
-
-  // Retrieve the nid, vid from the workbench_scheduler_nodes table.
-  $schedule_query->fields('wsn')
-
-  // Retrieve the start state from the workbench_scheduler_schedules table.
-    ->fields('wss', array('start_state'))
-  // Node type.
-    ->fields('node', array('type'))
-  // Add condition for schedules that have not been completed.
-    ->condition('wsn.completed', 0)
-  // Add condition where no start date or start date is before now.
-    ->condition('wsn.start_date', 0, '!=')
-    ->condition('wsn.start_date', $timestamp, '<=');
-
-  // Only grab vid with highest hid.
-  $schedule_query->isNull('wmnh2.hid');
-
-  // Create an or condition.
-  $db_or = db_or();
-  // Where no end date.
-  $db_or->condition('wsn.end_date', 0);
-  // Or end date is after now.
-  $db_or->condition('wsn.end_date', $timestamp, '>');
-  // Add or condition to the query.
-  $schedule_query->condition($db_or);
-  // Order by vid to return the highest vid of each node.
-  $schedule_query->orderBy('wmnh.vid', 'DESC');
-
-  // Execute the query.
-  $schedule_nodes = $schedule_query->execute();
-
-  // If scheduled nodes are returned from the query.
-  if ($schedule_nodes->rowCount()) {
-    // Include workbench moderation.
-    module_load_include('module', 'workbench_moderation');
-
-    // Loop through each scheduled node.
-    foreach ($schedule_nodes as $node_schedule) {
-
-      $do_process = FALSE;
-      $type_settings = variable_get('workbench_scheduler_' . $node_schedule->type, array());
-
-      // Only process latest revision.
-      if (in_array('workbench_scheduler_limit_current_revision', $type_settings)) {
-
-        // Getting the latest revision.
-        $rev_list = node_revision_list($node_schedule);
-        $latest_vid = max(array_keys($rev_list));
-
-        if ($node_schedule->vid == $latest_vid) {
-          $do_process = TRUE;
-        }
-      }
-      // Process all revisions.
-      else {
-        $do_process = TRUE;
-      }
-
-      // Load and process the node.
-      if ($do_process && $node = node_load($node_schedule->nid, $node_schedule->vid)) {
-        // If moderation state is 'unpublished' follow a different workflow.
-        if ($node_schedule->start_state == 'unpublished' && $node->status) {
-          workbench_scheduler_moderate_unpublish($node);
-        }
-        // Moderate the node using workbench_moderation.
-        else {
-          workbench_moderation_moderate($node, $node_schedule->start_state);
-        }
-        // Does this schedule have an end date as well?
-        if ($node_schedule->end_date) {
-        }
-        // Do not mark as completed, since need to wait for end date.
-        else {
-          // No end state so mark schedule as complete.
-          workbench_scheduler_node_set_complete($node_schedule->nid, $node_schedule->vid, $node_schedule->sid);
-        }
-        // Update count of run schedules.
-        $count++;
-        module_invoke_all('workbench_scheduler_post_process_start_dates', $node_schedule);
-      }
-    }
-  }
-  // Return int if nodes that were moderated, if none boolean FALSE.
-  return $count ?: FALSE;
-}
-
-/**
- * Run schedules for end times / states.
- *
- * @param int $timestamp
- *   Timestamp to check against.
- *
- * @return int|bool
- *   Count of nodes that were processed or boolean FALSE.
- */
-function workbench_scheduler_process_end_dates($timestamp) {
+function workbench_scheduler_process_dates($timestamp) {
   // Fetch all nodes that need to have their states changed to the 'end_date'.
   // State before NOW, and have not already done so.
   // Instantiate a counter for number of nodes processed.
+
+  $schedule_query = db_select('workbench_scheduler_nodes', 'wsn');
+  $schedule_query->fields('wsn')
+    ->condition('wsn.completed', 0)
+    ->condition('wsn.date', 0, '!=')
+    ->condition('wsn.date', time(), '<=');
+  $schedule_query->orderby('wsn.date', 'ASC');
+  $result = $schedule_query->execute();
+
+  $scheduled_nodes = array();
+  foreach ($result as $record) {
+    $scheduled_nodes[] = $record;
+  }
+
+  // Only process active node schedules.
+  _workbench_scheduler_process_node_schedules($scheduled_nodes);
+
   $count = 0;
 
-  // Select from the workbench_scheduler_nodes table.
-  $schedule_query = db_select('workbench_scheduler_nodes', 'wsn');
-
-  // Join node table to get 'type'.
-  $schedule_query->innerjoin('node', 'node', 'node.nid = wsn.nid');
-
-  // Inner join on workbench_scheduler_schedules table on schedule id.
-  $schedule_query->innerjoin('workbench_scheduler_schedules', 'wss', 'wsn.sid = wss.sid');
-
-  // Inner join on workbench_moderation_node_history table on nid, revision id.
-  // And where the current state does not equal the end state.
-  $schedule_query->innerjoin('workbench_moderation_node_history', 'wmnh', 'wsn.nid = wmnh.nid AND wsn.vid = wmnh.vid AND wss.end_state != wmnh.state');
-
-  // Join the node history table and grab highest vid of the highest hid.
-  $schedule_query->leftJoin('workbench_moderation_node_history', 'wmnh2', 'wmnh.nid = wmnh2.nid AND wmnh.vid = wmnh2.vid AND wmnh.hid < wmnh2.hid');
-
-  // Retrieve the nid, vid from the workbench_scheduler_nodes table.
-  $schedule_query->fields('wsn')
-  // Retrieve the end state from the workbench_scheduler_schedules table.
-    ->fields('wss', array('end_state'))
-  // Node type.
-    ->fields('node', array('type'))
-  // Add condition where schedule has not been completed.
-    ->condition('wsn.completed', 0)
-  // Add condition where end date is not 0.
-    ->condition('wsn.end_date', 0, '!=')
-  // Add condition where end date is before now.
-    ->condition('wsn.end_date', $timestamp, '<=');
-
-  $schedule_query->isNull('wmnh2.hid');
-
-  // Order by vid to return the highest vid of each node.
-  $schedule_query->orderBy('wmnh.vid', 'DESC');
-
-  // Execute the query.
-  $scheduled_nodes = $schedule_query->execute();
-
-  // If scheduled nodes are returned from the query.
-  if ($scheduled_nodes->rowCount()) {
+  if (!empty($scheduled_nodes)) {
 
     // Include workbench moderation.
     module_load_include('module', 'workbench_moderation');
 
+    // Loading transitions
+    $transitions = workbench_moderation_transitions();
+
     // Loop through each scheduled node.
     foreach ($scheduled_nodes as $node_schedule) {
+      if ($node_schedule->active) {
 
-      $do_process = FALSE;
-      $type_settings = variable_get('workbench_scheduler_' . $node_schedule->type, array());
+        // Getting current transition info.
+        $transition = current(array_filter($transitions, function($transition) use (&$node_schedule) {
+          return $transition->id == $node_schedule->schedule->transition;
+        }));
 
-      // Only process latest revision.
-      if (in_array('workbench_scheduler_limit_current_revision', $type_settings)) {
+        $do_process = FALSE;
 
-        // Getting the latest revision.
-        $rev_list = node_revision_list($node_schedule);
-        $latest_vid = max(array_keys($rev_list));
+        // Need to load the node revision.
+        $node = node_load($node_schedule->nid, $node_schedule->vid);
 
-        if ($node_schedule->vid == $latest_vid) {
-          $do_process = TRUE;
+        if (!empty($node) && !empty($transition)) {
+
+          // Make sure current transition is the starting transition.
+          $transition_valid = $transition->from_name == $node->workbench_moderation['current']->state;
+          if ($transition_valid) {
+            $do_process = TRUE;
+
+            // Allow modules to override the transition logic.
+            // Note: modules can only prevent valid transitions from being processed;
+            // they can't force invalid transitions.
+            $override = module_invoke_all('workbench_scheduler_cron_transition', $node_schedule);
+            if (in_array(FALSE, $override, TRUE)) {
+              $do_process = FALSE;
+            }
+          }
+
+          if ($do_process) {
+            // Only moderate if state is not 'unpublish'.
+            // If transition is not published  follow a different workflow.
+            if ($transition->to_name != workbench_moderation_state_published() && $node->status == NODE_PUBLISHED) {
+              workbench_scheduler_moderate_unpublish($node, $transition->to_name);
+            }
+            // Moderate the node using workbench_moderation
+            else {
+              // Adding support for Workbench Moderation 7.x-3.x.
+              if (function_exists('workbench_moderation_save')) {
+                $node->workbench_moderation_state_new = $transition->to_name;
+                $node->revision = TRUE;
+                $node->is_current = TRUE;
+
+                // Remove any schedules from new revision that are being executed.
+                foreach($node->workbench_schedule as $index =>  $revision_schedule) {
+                  $revisions_match = ($revision_schedule->vid == $node_schedule->vid);
+                  $schedules_match = ($revision_schedule->sid == $node_schedule->sid);
+
+                  if ($revisions_match && $schedules_match) {
+                   unset($node->workbench_schedule[$index]);
+                  }
+                }
+                node_save($node);
+              }
+              else {
+                workbench_moderation_moderate($node, $transition->to_name);
+              }
+            }
+
+            // Mark schedule as completed.
+            workbench_scheduler_node_set_complete($node_schedule->nid, $node_schedule->vid, $node_schedule->sid);
+            // Update count of run schedules.
+            $count++;
+            module_invoke_all('workbench_scheduler_post_process_dates', $node_schedule);
+          }
         }
-      }
-      // Process all revisions.
-      else {
-        $do_process = TRUE;
-      }
-
-      // Need to load the node.
-      if ($do_process && $node = node_load($node_schedule->nid, $node_schedule->vid)) {
-        // Only moderate if state is not 'unpublish'.
-        // If moderation state is 'unpublished' follow a different workflow.
-        if ($node_schedule->end_state == 'unpublished' && $node->status) {
-          workbench_scheduler_moderate_unpublish($node);
-        }
-        // Moderate the node using workbench_moderation.
-        else {
-          workbench_moderation_moderate($node, $node_schedule->end_state);
-        }
-
-        // Mark schedule as completed.
-        workbench_scheduler_node_set_complete($node_schedule->nid, $node_schedule->vid, $node_schedule->sid);
-        // Update count of run schedules.
-        $count++;
-        module_invoke_all('workbench_scheduler_post_process_end_dates', $node_schedule);
       }
     }
   }
@@ -1373,7 +1489,7 @@ function workbench_scheduler_process_end_dates($timestamp) {
  * @param object $node
  *   The node to unpublish.
  */
-function workbench_scheduler_moderate_unpublish($node) {
+function workbench_scheduler_moderate_unpublish($node, $state){
   module_load_include('module', 'workbench_moderation');
   module_load_include('inc', 'workbench_moderation', 'workbench_moderation.node');
   // Copied from workbench_moderation_node_unpublish_form_submit.
@@ -1385,7 +1501,7 @@ function workbench_scheduler_moderate_unpublish($node) {
     ->execute();
 
   // Moderate the revision.
-  workbench_moderation_moderate($node, workbench_moderation_state_none());
+  workbench_moderation_moderate($node, $state);
 
   // Make sure the 'current' revision is the 'live' revision.
   // I.e, the revision in {node}.
@@ -1398,21 +1514,17 @@ function workbench_scheduler_moderate_unpublish($node) {
 }
 
 /**
- * Content Type Edit Form.
+ * Implements hook_workbench_moderation_transition_delete().
  */
-function workbench_scheduler_form_node_type_form_alter(&$form, &$form_state, $form_id) {
-
-  // Add Workbench Scheduler options.
-  $form['workflow']['workbench_scheduler'] = array(
-    '#type' => 'checkboxes',
-    '#title' => t('Workbench Scheduler'),
-    '#options' => array(
-      'workbench_scheduler_limit_current_revision' => t('Allow active schedule for latest revisions only'),
-    ),
-    '#states' => array(
-      'visible' => array(':input[name="node_options[moderation]"]' => array('checked' => TRUE)),
-    ),
-    '#weight' => 1,
-    '#default_value' => variable_get('workbench_scheduler_' . $form['#node_type']->type, array()),
-  );
+function workbench_scheduler_workbench_moderation_transition_delete($transition) {
+  // Delete any schedules that use this transition.
+  // Also deletes schedules when states (Draft, Published etc.) are deleted.
+  $schedules = workbench_scheduler_schedules_load();
+  if (!empty($schedules)) {
+    foreach ($schedules as $schedule) {
+      if ($schedule->transition == $transition->id) {
+        workbench_scheduler_delete_schedules($schedule->name);
+      }
+    }
+  }
 }

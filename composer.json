@@ -1,6 +1,0 @@
-{
-  "name": "drupal/modules/workbench_scheduler",
-  "description": "patched version of drupal workbench_scheduler",
-  "minimum-stability": "stable",
-  "license": "proprietary"
-}
