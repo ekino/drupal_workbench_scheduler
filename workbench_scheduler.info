@@ -3,6 +3,12 @@ description = Provides ability to schedule state changes
 package = Workbench
 core = 7.x
 
+configure = admin/config/workbench/scheduler
+
 dependencies[] = workbench_moderation
 dependencies[] = date
 dependencies[] = date_popup
+files[] = includes/workbench_scheduler_handler_filter_name.inc
+files[] = includes/workbench_scheduler_handler_filter_active.inc
+files[] = actions/workbench_scheduler.action.inc
+files[] = tests/workbench_scheduler.test

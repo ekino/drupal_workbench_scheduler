@@ -1,5 +1,4 @@
 <?php
-
 /**
  * @file
  * Tests for workbench_scheduler.module.
@@ -30,12 +29,9 @@ class WorkbenchSchedulerTestCase extends DrupalWebTestCase {
       "create {$this->content_type} content",
       'administer workbench schedules',
       'administer content types',
-      'set workbench schedule',
       'set any workbench schedule',
     ));
-
   }
-
 }
 
 /**
@@ -57,16 +53,11 @@ class WorkbenchSchedulerScheduleTestCase extends WorkbenchSchedulerTestCase {
   }
 
   function testScheduleCreate() {
-
-    $states = workbench_scheduler_state_labels();
-    $indexes = array_rand($states, 2);
-
     // Create schedule.
     $edit = array();
     $edit['label'] = $this->randomName(8);
     $edit['name'] = strtolower($this->randomName(8));
-    $edit['start_state'] = $indexes[0];
-    $edit['end_state'] = $indexes[1];
+    $edit['transition'] = 1;
     // $edit['#schedule'] = new stdClass;
     $edit["types[{$this->content_type}]"] = $this->content_type;
 
@@ -76,8 +67,7 @@ class WorkbenchSchedulerScheduleTestCase extends WorkbenchSchedulerTestCase {
       ->fields('wss')
       ->condition('wss.name', $edit['name'], '=')
       ->condition('wss.label', $edit['label'], '=')
-      ->condition('wss.start_state', $edit['start_state'], '=')
-      ->condition('wss.end_state', $edit['end_state'], '=')
+      ->condition('wss.transition', $edit['transition'], '=')
       ->range(0, 1);
 
     // Checking table relationships.
@@ -85,15 +75,12 @@ class WorkbenchSchedulerScheduleTestCase extends WorkbenchSchedulerTestCase {
     $query->execute();
 
     $this->assertTrue($query, 'Workbench Schedule saved');
-
   }
-
 }
 
 /**
  * Assign node to schedule.
  */
-
 class WorkbenchSchedulerNodeScheduleTestCase extends WorkbenchSchedulerTestCase {
 
   public static function getInfo() {
@@ -111,12 +98,16 @@ class WorkbenchSchedulerNodeScheduleTestCase extends WorkbenchSchedulerTestCase 
 
   /**
    * Create Node With Schedule.
-   * @param $sid
-   * @param $time_start
-   * @param $time_end
+   * @param $schedule
+   * @param $ts (optional)
    * @return mixed
    */
-  private function createScheduledNode($sid, $time_start, $time_end) {
+  private function createScheduledNode($schedule, $ts = null) {
+    // Parse arguments.
+    if (is_numeric($schedule) && !empty($ts)) {
+      $schedule = array($schedule => $ts);
+    }
+
     // Create node to edit.
     $langcode = LANGUAGE_NONE;
     $body_key = "body[$langcode][0][value]";
@@ -124,11 +115,13 @@ class WorkbenchSchedulerNodeScheduleTestCase extends WorkbenchSchedulerTestCase 
     $edit = array();
     $edit['title'] = $this->randomName(8);
     $edit[$body_key] = $this->randomName(16);
-    $edit['workbench_scheduler_sid'] = $sid;
-    $edit['workbench_scheduler_start_date[date]'] = date('Y-m-d', $time_start);
-    $edit['workbench_scheduler_start_date[time]'] = date('H:i', $time_start);
-    $edit['workbench_scheduler_end_date[date]'] = date('Y-m-d', $time_end);
-    $edit['workbench_scheduler_end_date[time]'] = date('H:i', $time_end);
+
+    // Adding schedules. Supports multple.
+    foreach ($schedule as $sid => $time) {
+      $edit['workbench_scheduler_sid[' . $sid . ']'] = TRUE;
+      $edit['workbench_scheduler_date[' . $sid . '][date]'] = date('m/d/Y', $time);
+      $edit['workbench_scheduler_date[' . $sid . '][time]'] = date('H:i', $time);
+    }
     $this->drupalPost('node/add/' . $this->content_type, $edit, t('Save'));
 
     // Checking the node.
@@ -139,13 +132,11 @@ class WorkbenchSchedulerNodeScheduleTestCase extends WorkbenchSchedulerTestCase 
       ->fields('wsn')
       ->condition('wsn.nid', $node->nid, '=')
       ->condition('wsn.sid', $sid, '=')
-      ->condition('wsn.start_date', $time_start, '=')
-      ->condition('wsn.end_date', $time_end, '=')
-      ->range(0, 1)
+      ->condition('wsn.date', $time, '=')
       ->execute()
       ->rowCount();
 
-    $this->assertTrue($result, "Schedule assigned to node {$node->title}");
+    $this->assertTrue($result, $result . " schedule(s) assigned to node {$node->title}");
 
     return $node;
   }
@@ -154,34 +145,35 @@ class WorkbenchSchedulerNodeScheduleTestCase extends WorkbenchSchedulerTestCase 
    * Test Node Schedule.
    */
   public function testNodeSchedule() {
+    // Create two schedules.
+    // We do this because each node can schedule multiple schedules.
+    $schedule_transitions = array(1,2);
 
-    $states = workbench_scheduler_state_labels();
-    $indexes = array_rand($states, 2);
+    foreach ($schedule_transitions as $id) {
+      $edit = array();
+      $edit['label'] = $this->randomName(8);
+      $edit['name'] = strtolower($this->randomName(8));
+      $edit['transition'] = $id;
+      $edit["types[{$this->content_type}]"] = $this->content_type;
+      $this->drupalPost('admin/config/workbench/scheduler/schedules/add', $edit, t('Save'));
+    }
 
-    // Create schedule.
-    $edit = array();
-    $edit['label'] = $this->randomName(8);
-    $edit['name'] = strtolower($this->randomName(8));
-    $edit['start_state'] = $indexes[0];
-    $edit['end_state'] = $indexes[1];
-    $edit["types[{$this->content_type}]"] = $this->content_type;
-    $this->drupalPost('admin/config/workbench/scheduler/schedules/add', $edit, t('Save'));
-    // Get the sid.
-    $query = db_select('workbench_scheduler_schedules', 'wss')
+    // Get all schedules.
+    $schedule_query = db_select('workbench_scheduler_schedules', 'wss')
       ->fields('wss')
-      ->condition('wss.name', $edit['name'], '=')
-      ->condition('wss.label', $edit['label'], '=')
-      ->condition('wss.start_state', $edit['start_state'], '=')
-      ->condition('wss.end_state', $edit['end_state'], '=')
-      ->execute()->fetchAssoc();
+      ->execute()
+      ->fetchAllAssoc('sid');
+
+    // Get the first sid. We'll use this for most of the tests.
+    $schedule = $schedule_query[1];
 
     // Default behavior - one schedule.
     // Running a test to make sure that a schedule runs when applied to a node.
-    $start_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y')) - 60;
-    $end_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y'));
+    $ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y'));
 
-    $node = $this->createScheduledNode($query['sid'], $start_ts, $end_ts);
+    $node = $this->createScheduledNode($schedule->sid, $ts);
 
+    // Run the schedule.
     $this->cronRun();
 
     // There should only be one row.
@@ -194,65 +186,83 @@ class WorkbenchSchedulerNodeScheduleTestCase extends WorkbenchSchedulerTestCase 
 
     $this->assertTrue($result, "Cron run for {$node->title}: One Schedule was run for one revision.");
 
-    // Default behavior - two schedules.
-    // Running a test to see that all schedules run when a node as two or more schedules (one for each revision).
-    $start_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y')) - 120;
-    $end_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y'));
-    $node = $this->createScheduledNode($query['sid'], $start_ts, $end_ts);
+    // Default behavior - 2 revisions each with a schedule.
+    // Two revisions, each have their onw schedule.
+    $ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y'));
+
+    $node = $this->createScheduledNode($schedule->sid, $ts);
 
     // Add a new schedule that happens after.
     $edit = array();
-    $edit['workbench_scheduler_sid'] = $query['sid'];
-    $edit['workbench_scheduler_start_date[date]'] = date('Y-m-d', $start_ts + 60);
-    $edit['workbench_scheduler_start_date[time]'] = date('H:i', $start_ts + 60);
-    $edit['workbench_scheduler_end_date[date]'] = date('Y-m-d', $end_ts);
-    $edit['workbench_scheduler_end_date[time]'] = date('H:i', $end_ts);
-    $this->drupalPost('node/' . $node->nid . '/edit', $edit, t('Save'));
+    $edit['workbench_scheduler_sid['.$schedule->sid.']'] = TRUE;
+    $edit['workbench_scheduler_date['.$schedule->sid.'][date]'] = date('m/d/Y', $ts + 60);
+    $edit['workbench_scheduler_date['.$schedule->sid.'][time]'] = date('H:i', $ts + 60);
+    $this->drupalPost('node/add/' . $this->content_type, $edit, t('Save'));
 
     $this->cronRun();
 
-    // There should be two completed rows.
+    // Run cron again. (This is to make sure no other schedules are run).
+    $this->cronRun();
+
+    // There should be one completed row.
     $result = db_select('workbench_scheduler_nodes', 'wsn')
       ->fields('wsn')
       ->condition('wsn.nid', $node->nid, '=')
       ->condition('wsn.completed', 1, '=')
+      ->condition('wsn.vid', $node->vid)
       ->execute()
       ->rowCount();
 
-    $this->assertEqual($result, 2, "Cron run for {$node->title}: All schedules run for all revisions.");
+    $this->assertEqual($result, 1, "Cron run for {$node->title}: Only schedule for latest revision run.");
+
+    // Default behavior - 1 revision with multiple schedules.
+    // Make timestamp in the past so it will run.
+    $ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y')) - 120;
+
+    // Add multiple schedules.
+    $schedules = array();
+    foreach ($schedule_query as $schedule_data) {
+      $schedules[$schedule_data->sid] = $ts;
+      $ts += 60;
+    }
+    $node = $this->createScheduledNode($schedules);
+
+    // Change state once.
+    $this->cronRun();
+
+    // Change state again.
+    $this->cronRun();
+
+    // There should be two completed schedules.
+    $result = db_select('workbench_scheduler_nodes', 'wsn')
+      ->fields('wsn')
+      ->condition('wsn.nid', $node->nid, '=')
+      ->condition('wsn.vid', $node->vid, '=')
+      ->condition('wsn.completed', 1, '=')
+      ->execute()
+      ->rowCount();
+
+    $this->assertEqual($result, 2, "Cron run for {$node->title}: Two schedules were run.");
 
     // Secondary behavior - one schedule.
     // Update content type settings.
-    // TODO: This is returning a minor error, need to fix
-    $edit = array();
-    $edit['workbench_scheduler[workbench_scheduler_limit_current_revision]'] = 1;
-    $this->drupalPost('admin/structure/types/manage/' . $this->content_type, $edit, t('Save content type'));
+    // One revision has a schedule, another revision doesn't.
+    $ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y'));
 
-    $this->assert(TRUE, "Settings updated for content type {$this->content_type}. Run schedules on latest revisions only.");
-
-    // Two revisions, each have their onw schedule.
-    $start_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y')) - 120;
-    $end_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y'));
-
-    $node = $this->createScheduledNode($query['sid'], $start_ts, $end_ts);
+    $node = $this->createScheduledNode($schedule->sid, $ts);
 
     // Add a new schedule that happens after.
     $edit = array();
-    $edit['workbench_scheduler_sid'] = $query['sid'];
-    $edit['workbench_scheduler_start_date[date]'] = date('Y-m-d', $start_ts + 60);
-    $edit['workbench_scheduler_start_date[time]'] = date('H:i', $start_ts + 60);
-    $edit['workbench_scheduler_end_date[date]'] = date('Y-m-d', $end_ts);
-    $edit['workbench_scheduler_end_date[time]'] = date('H:i', $end_ts);
-
+    $edit['workbench_scheduler_sid['.$schedule->sid.']'] = FALSE;
     $this->drupalPost('node/' . $node->nid . '/edit', $edit, t('Save'));
+
+    $this->cronRun();
 
     // Getting the latest revision.
     $rev_list = node_revision_list($node);
     $latest_vid = max(array_keys($rev_list));
 
-    $this->cronRun();
-
-    // There should be two completed rows.
+    // Should be no results returned.
     $result = db_select('workbench_scheduler_nodes', 'wsn')
       ->fields('wsn')
       ->condition('wsn.nid', $node->nid, '=')
@@ -261,39 +271,6 @@ class WorkbenchSchedulerNodeScheduleTestCase extends WorkbenchSchedulerTestCase 
       ->execute()
       ->rowCount();
 
-    $this->assertTrue($result, "Cron run for {$node->title}: Only schedule for latest revision run.");
-
-    // One revision has a schedule, another revision doesn't.
-    $start_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y')) - 120;
-    $end_ts = mktime(date('H'), date('i'), 0, date('m'), date('d'), date('Y'));
-
-    $node = $this->createScheduledNode($query['sid'], $start_ts, $end_ts);
-
-    // Save new revision (no schedule).
-    $edit = array();
-    $edit['workbench_scheduler_sid'] = 0;
-    $edit['workbench_scheduler_start_date[date]'] = 0;
-    $edit['workbench_scheduler_start_date[time]'] = 0;
-    $edit['workbench_scheduler_end_date[date]'] = 0;
-    $edit['workbench_scheduler_end_date[time]'] = 0;
-
-    $this->drupalPost('node/' . $node->nid . '/edit', $edit, t('Save'));
-
-    // Getting the latest revision.
-    $rev_list = node_revision_list($node);
-    $latest_vid = max(array_keys($rev_list));
-
-    $this->cronRun();
-
-    // Should be no results returned.
-    $result = db_select('workbench_scheduler_nodes', 'wsn')
-      ->fields('wsn')
-      ->condition('wsn.nid', $node->nid, '=')
-      ->condition('wsn.completed', 1, '=')
-      ->execute()
-      ->rowCount();
-
     $this->assertFalse($result, "Cron run for {$node->title}: No schedules run.");
   }
-
 }
